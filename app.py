@@ -34,7 +34,7 @@ def style_function(feature):
 with st.sidebar:
     st.header("功能導覽")
     # 這裡新增了三個頁面
-    page = st.radio("請選擇頁面", ["專案總覽", "縣市預測地圖", "縣市折線圖"])
+    page = st.radio("請選擇頁面", ["專案總覽", "縣市預測地圖", "縣市折線圖", "模型績效排行"])
     
     st.divider()
     st.write("大數據分析期末專案")
@@ -118,3 +118,36 @@ elif page == "縣市折線圖":
     st.plotly_chart(fig, use_container_width=True)
 
     st.caption("備註：數據為模擬佔位符數據。")
+
+elif page == "模型績效排行":
+    # --- 11/29 任務：模型績效排行榜頁面 ---
+    st.title("模型績效排行榜與結果統整 🥇")
+    st.info("這是從組員處接收的模型訓練成果，用於比較 Baseline、XGBoost 與 LightGBM 的表現。")
+
+    # 模擬從組員 (人1, 人2, 人3, 人4, 人6) 接收到的數據
+    data = {
+        '模型名稱': ['Baseline (t-1)', 'XGBoost (v2)', 'LightGBM (v2)', 'Ensemble Model'],
+        'PM2.5 RMSE': [8.55, 3.12, 2.98, 2.85], # 數值越低越好
+        '訓練時間 (s)': [0, 45.2, 32.1, 80.5]
+    }
+    df_performance = pd.DataFrame(data)
+
+    st.subheader("📊 模型比較總表")
+    # 顯示表格數據
+    st.dataframe(df_performance, use_container_width=True)
+
+    # 產生報告所需的圖表 (performance_table.png 的視覺化概念)
+    st.subheader("📈 視覺化比較：PM2.5 RMSE")
+    
+    # 使用 Plotly 繪製 Bar Chart 視覺化比較
+    fig_rank = px.bar(df_performance, 
+                     x='模型名稱', 
+                     y='PM2.5 RMSE', 
+                     title='不同模型 PM2.5 預測 RMSE 比較 (越低越好)',
+                     color='PM2.5 RMSE',
+                     # 使用紅色漸層，但反轉顏色，讓最低的 RMSE 顏色較深 (代表最佳)
+                     color_continuous_scale=px.colors.sequential.Reds_r) 
+    
+    st.plotly_chart(fig_rank, use_container_width=True)
+
+    st.success("✅ 人5 任務完成：請將上方的表格或圖表截圖，另存為 performance_table.png 作為 12/1 報告使用！")
