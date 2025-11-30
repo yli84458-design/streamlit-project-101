@@ -25,16 +25,14 @@ if page == "專案總覽":
     col1, col2 = st.columns(2)
     
     with col1:
-        # SDG 11 圖片 (直接使用維基百科或聯合國的公開連結，免去上傳檔案的麻煩)
-        st.image("https://upload.wikimedia.org/wikipedia/commons/0/09/Sustainable_Development_Goal_11.png", 
+        # 新的 SDG 11 圖片連結 (已修正)
+        st.image("https://sdgs.un.org/sites/default/files/goals/E_SDG_goals_icons-individual-rgb-11.png", 
                  caption="SDG 11: 永續城鄉")
-        st.write("促使城市與人類居住具包容、安全、韌性及永續性。")
 
     with col2:
-        # SDG 13 圖片
-        st.image("https://upload.wikimedia.org/wikipedia/commons/a/a6/Sustainable_Development_Goal_13.png", 
+        # 新的 SDG 13 圖片連結 (已修正)
+        st.image("https://sdgs.un.org/sites/default/files/goals/E_SDG_goals_icons-individual-rgb-13.png", 
                  caption="SDG 13: 氣候行動")
-        st.write("完備減緩調適行動，以因應氣候變遷及其影響。")
 
 elif page == "縣市預測":
     # --- 這是縣市預測頁面 ---
