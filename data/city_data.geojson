@@ -1,0 +1,24 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "city_name": "placeholder_city",
+        "pm25": 40
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.5, 25.0],
+            [121.6, 25.0],
+            [121.6, 25.1],
+            [121.5, 25.1],
+            [121.5, 25.0]
+          ]
+        ]
+      }
+    }
+  ]
+}
