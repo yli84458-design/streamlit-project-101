@@ -25,15 +25,15 @@ if page == "專案總覽":
     col1, col2 = st.columns(2)
     
     with col1:
-        # 新的 SDG 11 圖片連結 (已修正)
-        st.image("https://sdgs.un.org/sites/default/files/goals/E_SDG_goals_icons-individual-rgb-11.png", 
+      # 讀取專案內 images 資料夾中的 sdg11.png
+        st.image("images/sdg11.png", 
                  caption="SDG 11: 永續城鄉")
 
     with col2:
-        # 新的 SDG 13 圖片連結 (已修正)
-        st.image("https://sdgs.un.org/sites/default/files/goals/E_SDG_goals_icons-individual-rgb-13.png", 
+       # 讀取專案內 images 資料夾中的 sdg13.png
+        st.image("images/sdg13.png", 
                  caption="SDG 13: 氣候行動")
-
+        
 elif page == "縣市預測":
     # --- 這是縣市預測頁面 ---
     st.title("縣市數據預測分析 📊")
