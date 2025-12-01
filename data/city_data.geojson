@@ -4,18 +4,143 @@
     {
       "type": "Feature",
       "properties": {
-        "city_name": "placeholder_city",
-        "pm25": 40
+        "COUNTYNAME": "臺北市",
+        "ENNAME": "Taipei City"
       },
       "geometry": {
         "type": "Polygon",
         "coordinates": [
           [
-            [121.5, 25.0],
-            [121.6, 25.0],
-            [121.6, 25.1],
+            [121.56, 25.04],
             [121.5, 25.1],
-            [121.5, 25.0]
+            [121.62, 25.08],
+            [121.56, 25.04]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "新北市",
+        "ENNAME": "New Taipei City"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.46, 25.02],
+            [121.3, 24.9],
+            [121.7, 25.15],
+            [121.46, 25.02]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "桃園市",
+        "ENNAME": "Taoyuan City"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.3, 24.9],
+            [121.0, 24.8],
+            [121.3, 24.6],
+            [121.3, 24.9]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "臺中市",
+        "ENNAME": "Taichung City"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [120.65, 24.15],
+            [120.4, 24.0],
+            [120.8, 24.3],
+            [120.65, 24.15]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "高雄市",
+        "ENNAME": "Kaohsiung City"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [120.3, 22.63],
+            [120.2, 22.5],
+            [120.5, 22.8],
+            [120.3, 22.63]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "臺南市",
+        "ENNAME": "Tainan City"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [120.2, 23.0],
+            [120.0, 22.8],
+            [120.3, 23.2],
+            [120.2, 23.0]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "彰化縣",
+        "ENNAME": "Changhua County"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [120.5, 24.0],
+            [120.3, 23.8],
+            [120.6, 24.2],
+            [120.5, 24.0]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "COUNTYNAME": "南投縣",
+        "ENNAME": "Nantou County"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [120.95, 23.9],
+            [120.7, 23.7],
+            [121.1, 24.1],
+            [120.95, 23.9]
           ]
         ]
       }
