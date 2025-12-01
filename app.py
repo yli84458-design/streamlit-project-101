@@ -37,12 +37,13 @@ def load_data():
         st.error(f"載入 'air_quality_raw.csv' 時發生錯誤: {e}")
     
     try:
-        # 載入 GeoJSON 數據 (用於地圖)
+        # 載入 GeoJSON 數據 (雖然點狀圖不再需要，但保留讀取以避免其他頁面報錯)
         with open('data/city_data.geojson', 'r', encoding='utf-8') as f:
             geojson_data = json.load(f)
         # st.success("地圖檔案 'data/city_data.geojson' 載入成功。") # 移除成功訊息
     except FileNotFoundError:
-        st.error("錯誤：找不到 'data/city_data.geojson'。請確認檔案已上傳至 data/ 資料夾。")
+        # 即使找不到 GeoJSON，點狀圖 (Marker Map) 也可以運行
+        st.warning("GeoJSON 文件 'data/city_data.geojson' 載入失敗，但點狀圖功能不依賴此檔案。")
     except Exception as e:
         st.error(f"載入 'data/city_data.geojson' 時發生錯誤: {e}")
         
@@ -111,68 +112,76 @@ def page_home():
 
 
 # --------------------
-# 3.2 縣市預測地圖
+# 3.2 縣市預測地圖 (已修改為點狀圖)
 # --------------------
 def page_map():
-    st.title("🗺️ 縣市預測地圖：PM2.5 濃度分佈")
-    st.info("展示各縣市當前或預測的 PM2.5 濃度。顏色越深/越暖，代表污染程度越高。")
+    st.title("🗺️ 縣市預測地圖：PM2.5 濃度點位分佈")
+    st.info("展示各縣市 PM2.5 濃度點位。點位顏色越深/點越大，代表污染程度越高。")
 
-    if geojson_data is None:
-        st.warning("無法繪製地圖：GeoJSON 文件載入失敗。")
-        return
-
-    # --- 模擬預測數據 (確保 City 和 GeoJSON 的 COUNTYNAME 一致) ---
-    try:
-        # 從 GeoJSON 中提取縣市名稱，確保與模擬數據的 City 欄位相匹配
-        city_names = [feature['properties']['COUNTYNAME'] for feature in geojson_data['features']]
-    except KeyError:
-        st.error("GeoJSON 格式錯誤：缺少 'COUNTYNAME' 屬性。無法匹配數據。")
-        return
-
-    # 創建模擬 PM2.5 預測值 (0-80 之間)
+    # --- 1. 縣市中心點座標查找表 (用於繪製點位) ---
+    city_coords = {
+        '臺北市': [25.033, 121.565],
+        '新北市': [25.01, 121.46],
+        '桃園市': [24.99, 121.31],
+        '臺中市': [24.14, 120.67],
+        '高雄市': [22.62, 120.31]
+    }
+    
+    # --- 2. 模擬預測數據 ---
+    
+    target_cities = list(city_coords.keys())
     np.random.seed(42) # 保持結果一致
+    
     df_map_data = pd.DataFrame({
-        'City': city_names,
-        'Predicted_PM25': np.random.randint(15, 80, size=len(city_names))
+        'City': target_cities,
+        # 模擬 PM2.5 預測值 (0-80 之間)
+        'Predicted_PM25': np.random.randint(15, 80, size=len(target_cities))
     })
 
-    # --- 地圖繪製核心邏輯 ---
+    # 合併坐標
+    df_map_data['Lat'] = df_map_data['City'].map(lambda x: city_coords.get(x, [None, None])[0])
+    df_map_data['Lon'] = df_map_data['City'].map(lambda x: city_coords.get(x, [None, None])[1])
+    
+    # 移除坐標為 None 的行
+    df_map_data.dropna(subset=['Lat', 'Lon'], inplace=True)
 
-    # 設置地圖中心點 (台灣北部與西部的中心點，以更好地顯示這五個城市)
-    # 調整 zoom_start 確保所有城市都能被看到
-    m = folium.Map(location=[24.0, 120.7], zoom_start=7, tiles="CartoDB positron")
+    # --- 3. 地圖繪製核心邏輯 (使用 CircleMarker) ---
 
-    try:
-        # ***********************************************
-        # 關鍵：Folium Choropleth 繪製
-        # ***********************************************
-        folium.Choropleth(
-            geo_data=geojson_data,
-            name='PM2.5 濃度分佈',
-            data=df_map_data,
-            columns=['City', 'Predicted_PM25'],             # 數據來源：縣市名稱和數值
-            key_on='feature.properties.COUNTYNAME',         # GeoJSON 鍵：必須與數據中的 City 欄位完全匹配
-            fill_color='YlOrRd',                            # 顏色方案 (從黃到紅)
+    # 設置地圖中心點 (調整至台灣大致中心，但縮放級別包含所有五個城市)
+    m = folium.Map(location=[24.5, 121.0], zoom_start=7, tiles="CartoDB positron")
+
+    # 定義顏色映射函數 (PM2.5 越高，顏色越紅)
+    def get_color(pm25):
+        if pm25 >= 60:
+            return '#E31A1C' # 紅色 (高污染)
+        elif pm25 >= 45:
+            return '#FF7F00' # 橘色 (中高污染)
+        elif pm25 >= 30:
+            return '#FFD700' # 黃色 (中等)
+        else:
+            return '#1F78B4' # 藍色 (良好)
+
+    # 迭代數據，添加圓形標記
+    for index, row in df_map_data.iterrows():
+        pm25 = row['Predicted_PM25']
+        color = get_color(pm25)
+        
+        # 使用 CircleMarker 繪製點位，大小與 PM2.5 相關
+        folium.CircleMarker(
+            location=[row['Lat'], row['Lon']],
+            radius=np.log(pm25) * 4, # 點的大小基於 PM2.5 濃度對數 (讓變化不要太劇烈)
+            color=color,
+            fill=True,
+            fill_color=color,
             fill_opacity=0.7,
-            line_opacity=0.5, # 增加邊界線透明度，讓邊界更清晰
-            legend_name='預測 PM2.5 濃度 (μg/m³)',
-            highlight=True,
+            popup=f"<b>{row['City']}</b><br>PM2.5 預測值: {pm25:.2f} µg/m³"
         ).add_to(m)
 
-        # ----------------------------------------------------
-        # 移除複雜的 GeoJsonTooltip 疊加，改用 Choropleth 內建的 Tooltip
-        # ----------------------------------------------------
-
-        # 顯示地圖
-        folium_static(m, width=900, height=600)
-        
-        # 顯示顏色圖例
-        st.caption("顏色圖例 (PM2.5)：黃色 (中等) -> 紅色 (高污染)")
-
-    except Exception as e:
-        st.error(f"地圖 Choropleth 繪製失敗，請檢查 GeoJSON 鍵名 (COUNTYNAME) 與數據欄位 (City) 是否完全匹配。錯誤詳情: {e}")
-        # 如果 Choropleth 失敗，我們仍然顯示一個基礎地圖
-        folium_static(m, width=900, height=600)
+    # 顯示地圖
+    folium_static(m, width=900, height=600)
+    
+    # 顯示顏色圖例
+    st.caption("點位圖例：點位大小與 PM2.5 濃度成正比。顏色越暖，濃度越高。")
 
 
 # --------------------
