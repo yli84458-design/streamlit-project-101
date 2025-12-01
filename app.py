@@ -21,29 +21,96 @@ st.set_page_config(
 # 模擬數據載入 (Streamlit 建議使用 @st.cache_data 提高性能)
 @st.cache_data
 def load_data():
-    """載入 CSV 和 GeoJSON 檔案。"""
+    """載入 CSV 和 GeoJSON 檔案，並在找不到時使用模擬數據。"""
     df_raw = pd.DataFrame()
     geojson_data = None
+    # 目標縣市，用於篩選和模擬數據
+    target_cities = ['臺北', '新北', '桃園', '臺中', '高雄']
     
+    # 🚨 更新檔案名稱為用戶上傳的名稱 🚨
+    # 如果您未來改回 air_quality_raw.csv，請修改這裡
+    file_path = 'air_quality_raw (1).csv' 
+    
+    # --- 嘗試載入 air_quality_raw (1).csv ---
     try:
         # 載入原始 PM2.5 數據 (用於折線圖)
-        df_raw = pd.read_csv('air_quality_raw.csv')
-        df_raw.rename(columns={'時間': 'Timestamp', '測站名稱': 'City', 'PM2.5': 'PM25_VALUE'}, inplace=True)
+        df_raw = pd.read_csv(file_path)
+        
+        # 確保欄位名稱正確轉換 (根據 CSV 預覽: 時間, 測站名稱, PM2.5)
+        df_raw.rename(columns={
+            '時間': 'Timestamp', 
+            '測站名稱': 'City', 
+            'PM2.5': 'PM25_VALUE',
+            '溫度': 'Temperature',  # 雖然目前沒用，但先轉換
+            '濕度': 'Humidity'    # 雖然目前沒用，但先轉換
+        }, inplace=True)
+        
+        # 數據清理與格式化
         df_raw['Timestamp'] = pd.to_datetime(df_raw['Timestamp'])
-        # st.success("數據檔案 'air_quality_raw.csv' 載入成功。") # 移除成功訊息，讓畫面更清爽
+        
+        # 篩選只保留目標縣市的數據
+        df_raw = df_raw[df_raw['City'].isin(target_cities)].copy()
+        
+        if df_raw.empty:
+             st.warning(f"⚠️ 找到了 {file_path}，但數據中不包含目標縣市 ({', '.join(target_cities)}) 或資料為空。")
+        else:
+             st.success(f"✅ 數據檔案 '{file_path}' 載入成功，正在使用真實數據。")
+             
     except FileNotFoundError:
-        st.error("錯誤：找不到 'air_quality_raw.csv'。請確認檔案已上傳至專案根目錄。")
+        # --------------------------------------------------
+        # FALLBACK: 找不到檔案時，自動生成一週的模擬數據
+        # --------------------------------------------------
+        st.error(f"❌ 錯誤：找不到 '{file_path}'。正在使用**模擬數據**以維持程式運行。")
+        
+        # 創建模擬時間序列 (7天，每小時一次)
+        num_records = 24 * 7 * len(target_cities)
+        timestamps = pd.to_datetime(pd.date_range('2025-11-21 00:00', periods=24*7, freq='H')).repeat(len(target_cities))[:num_records]
+        
+        # 創建模擬城市序列
+        cities = np.tile(target_cities, 24 * 7)[:num_records]
+        
+        # 創建模擬 PM2.5 數據 (加入一些隨機和週期性變化)
+        np.random.seed(42)
+        random_noise = np.random.uniform(-10, 10, size=num_records)
+        base_pm25 = 40 + np.sin(np.linspace(0, 4 * np.pi, num_records)) * 15 + random_noise
+        pm25_values = np.clip(base_pm25, 10, 80).astype(int) # 限制在 10 到 80 之間
+        
+        df_raw = pd.DataFrame({
+            'Timestamp': timestamps,
+            'City': cities,
+            'PM25_VALUE': pm25_values,
+            'Temperature': np.random.uniform(15, 30, size=num_records),
+            'Humidity': np.random.uniform(50, 90, size=num_records)
+        })
+        
     except Exception as e:
-        st.error(f"載入 'air_quality_raw.csv' 時發生錯誤: {e}")
+        st.error(f"❌ 載入 '{file_path}' 時發生錯誤: {e}")
+        # 如果載入真實數據失敗，為了確保折線圖頁面能運行，再次執行模擬數據生成
+        st.info("嘗試使用模擬數據作為備援。")
+        
+        # 創建模擬時間序列 (7天，每小時一次)
+        num_records = 24 * 7 * len(target_cities)
+        timestamps = pd.to_datetime(pd.date_range('2025-11-21 00:00', periods=24*7, freq='H')).repeat(len(target_cities))[:num_records]
+        cities = np.tile(target_cities, 24 * 7)[:num_records]
+        np.random.seed(42)
+        random_noise = np.random.uniform(-10, 10, size=num_records)
+        base_pm25 = 40 + np.sin(np.linspace(0, 4 * np.pi, num_records)) * 15 + random_noise
+        pm25_values = np.clip(base_pm25, 10, 80).astype(int)
+        
+        df_raw = pd.DataFrame({
+            'Timestamp': timestamps,
+            'City': cities,
+            'PM25_VALUE': pm25_values,
+            'Temperature': np.random.uniform(15, 30, size=num_records),
+            'Humidity': np.random.uniform(50, 90, size=num_records)
+        })
     
+    # --- 載入 GeoJSON (保持不變) ---
     try:
-        # 載入 GeoJSON 數據 (雖然點狀圖不再需要，但保留讀取以避免其他頁面報錯)
         with open('data/city_data.geojson', 'r', encoding='utf-8') as f:
             geojson_data = json.load(f)
-        # st.success("地圖檔案 'data/city_data.geojson' 載入成功。") # 移除成功訊息
     except FileNotFoundError:
-        # 即使找不到 GeoJSON，點狀圖 (Marker Map) 也可以運行
-        st.warning("GeoJSON 文件 'data/city_data.geojson' 載入失敗，但點狀圖功能不依賴此檔案。")
+        st.warning("GeoJSON 文件 'data/city_data.geojson' 載入失敗，但地圖功能不依賴此檔案。")
     except Exception as e:
         st.error(f"載入 'data/city_data.geojson' 時發生錯誤: {e}")
         
@@ -120,11 +187,11 @@ def page_map():
 
     # --- 1. 縣市中心點座標查找表 (用於繪製點位) ---
     city_coords = {
-        '臺北市': [25.033, 121.565],
-        '新北市': [25.01, 121.46],
-        '桃園市': [24.99, 121.31],
-        '臺中市': [24.14, 120.67],
-        '高雄市': [22.62, 120.31]
+        '臺北': [25.033, 121.565], # 臺北市
+        '新北': [25.01, 121.46],  # 新北市
+        '桃園': [24.99, 121.31],  # 桃園市
+        '臺中': [24.14, 120.67],  # 臺中市
+        '高雄': [22.62, 120.31]   # 高雄市
     }
     
     # --- 2. 模擬預測數據 ---
@@ -147,8 +214,9 @@ def page_map():
 
     # --- 3. 地圖繪製核心邏輯 (使用 CircleMarker) ---
 
-    # 設置地圖中心點 (調整至台灣大致中心，但縮放級別包含所有五個城市)
-    m = folium.Map(location=[24.5, 121.0], zoom_start=7, tiles="CartoDB positron")
+    # 設置地圖中心點 (台灣西海岸中部，調整 zoom_start 以放大視角，確保所有點都能看到)
+    # zoom_start=8 是一個較好的視角
+    m = folium.Map(location=[23.5, 120.9], zoom_start=8, tiles="CartoDB positron")
 
     # 定義顏色映射函數 (PM2.5 越高，顏色越紅)
     def get_color(pm25):
@@ -191,21 +259,25 @@ def page_line_chart():
     st.title("📊 縣市 PM2.5 歷史趨勢分析")
     st.info("選擇一個縣市，觀察其 PM2.5 歷史變化與單一測站的最新預測點。")
 
-    # 檢查數據是否載入
+    # 檢查數據是否載入成功
     if df_raw.empty:
-        st.warning("數據缺失，無法繪製圖表。")
+        st.error("數據缺失，無法繪製圖表。請檢查數據載入部分。")
         return
 
     # 側邊欄選擇器
     all_cities = df_raw['City'].unique()
     # 確保城市列表非空
     if not list(all_cities):
-        st.warning("數據中找不到縣市 (City) 名稱，請檢查 'air_quality_raw.csv' 格式。")
+        st.warning("數據中找不到縣市 (City) 名稱，請檢查載入數據的 '測站名稱' 欄位。")
         return
         
     selected_city = st.selectbox("選擇縣市:", all_cities)
 
+    # 確保選定的城市數據非空
     df_city = df_raw[df_raw['City'] == selected_city].copy()
+    if df_city.empty:
+        st.warning(f"找不到 {selected_city} 的數據。")
+        return
     
     # --- 模擬下一小時的預測值 ---
     
@@ -215,8 +287,10 @@ def page_line_chart():
     
     # 根據最新值模擬一個下一小時的預測值 (±5)
     try:
+        # 使用 iloc[0] 取得單一值
         latest_pm25 = df_city[df_city['Timestamp'] == latest_time]['PM25_VALUE'].iloc[0]
-        predicted_pm25 = latest_pm25 + np.random.uniform(-5, 5)
+        # 預測值範圍在 [0, 100]
+        predicted_pm25 = max(0, min(100, latest_pm25 + np.random.uniform(-5, 5)))
     except IndexError:
         st.error("所選城市數據異常，無法計算最新值。")
         return
