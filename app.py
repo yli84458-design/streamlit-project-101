@@ -9,20 +9,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
-import time
 
 # ==========================================
 # 🔧 核心設定 (Core Configuration)
 # ==========================================
 st.set_page_config(page_title="台灣 AI 空氣品質預測戰情室", layout="wide", page_icon="🍃")
 
-# 備援測站座標
+# 測站座標
 STATIONS_COORDS = {
     '台北': {'lat': 25.0330, 'lon': 121.5654},
     '板橋': {'lat': 25.0129, 'lon': 121.4624},
     '桃園': {'lat': 24.9976, 'lon': 121.3033},
     '新竹': {'lat': 24.8083, 'lon': 120.9681},
-    '臺中': {'lat': 24.1477, 'lon': 120.6736}, # 確保使用 '臺中'
+    '臺中': {'lat': 24.1477, 'lon': 120.6736}, 
     '嘉義': {'lat': 23.4800, 'lon': 120.4491},
     '台南': {'lat': 22.9902, 'lon': 120.2076},
     '高雄': {'lat': 22.6322, 'lon': 120.3013},
@@ -33,19 +32,18 @@ STATIONS_COORDS = {
     '馬祖': {'lat': 26.1557, 'lon': 119.9577},
 }
 
-# LASS/AirBox 靜態資料源 URL
 TARGET_URL = "https://pm25.lass-net.org/data/last-all-airbox.json"
 
 # ==========================================
-# 🛠️ 1. 爬蟲函數 (Data Fetcher)
+# 🛠️ 1. 爬蟲函數
 # ==========================================
 
-@st.cache_data(ttl=300) # 每 5 分鐘更新一次資料
+@st.cache_data(ttl=300) 
 def fetch_latest_lass_data():
-    """從 LASS 靜態資料源爬取最新的 PM2.5、溫濕度和地理位置資料。"""
-    
+    """從 LASS 靜態資料源爬取數據 (已快取，不會頻繁重跑)。"""
+    # 移除這裡的 spinner 以減少畫面變動
     try:
-        response = requests.get(TARGET_URL, timeout=15)
+        response = requests.get(TARGET_URL, timeout=10) # 縮短 timeout
         if response.status_code != 200:
             return None
         
@@ -59,27 +57,26 @@ def fetch_latest_lass_data():
         
         rename_dict = {
             's_d0': 'pm25',
-            's_t0': 'temp', # 溫度
-            's_h0': 'humidity', # 濕度
+            's_t0': 'temp', 
+            's_h0': 'humidity', 
             'gps_lat': 'lat',
             'gps_lon': 'lon',
             'timestamp': 'time'
         }
         
-        # 篩選與重命名
         cols_to_keep = list(rename_dict.keys())
+        # 確保 df_clean 是副本
         df_clean = df[[col for col in cols_to_keep if col in df.columns]].copy()
         df_clean.rename(columns=rename_dict, inplace=True)
 
-        # 轉換數值型態
-        required_cols = ['pm25', 'lat', 'lon', 'temp', 'humidity']
-        for col in required_cols:
-            if col in df_clean.columns:
-                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-            else:
+        # 處理缺失欄位
+        for col in ['pm25', 'lat', 'lon', 'temp', 'humidity']:
+            if col not in df_clean.columns:
                 df_clean[col] = np.nan
+            else:
+                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
 
-        # 過濾異常值 (台灣範圍)
+        # 過濾
         df_clean = df_clean[
             (df_clean['lat'].between(21, 26)) &
             (df_clean['lon'].between(119, 123)) &
@@ -92,19 +89,19 @@ def fetch_latest_lass_data():
         return None
 
 # ==========================================
-# ⚙️ 2. 資料處理與模型預測
+# ⚙️ 2. 資料處理與預測
 # ==========================================
 
 def create_features(df, station_name, current_time):
-    # 計算 LASS 數據的空間平均值
-    avg_pm25 = df['pm25'].mean() if not df.empty else 20.0
-    avg_temp = df['temp'].mean() if not df.empty else 25.0
-    avg_humid = df['humidity'].mean() if not df.empty else 70.0
+    avg_pm25 = df['pm25'].mean() if not df.empty else np.nan
+    avg_temp = df['temp'].mean() if not df.empty else np.nan
+    avg_humid = df['humidity'].mean() if not df.empty else np.nan
     
-    # 獲取測站座標
-    coords = STATIONS_COORDS.get(station_name, {'lat': 24.0, 'lon': 121.0})
+    if np.isnan(avg_pm25) or np.isnan(avg_temp) or np.isnan(avg_humid):
+         return None
 
-    # 構造特徵 DataFrame
+    coords = STATIONS_COORDS.get(station_name, {'lat': 0, 'lon': 0}) 
+
     features = {
         'pm25_t0': avg_pm25,         
         'temp_t0': avg_temp,         
@@ -124,20 +121,17 @@ def create_features(df, station_name, current_time):
 
 def predict_pm25_plus_1h(model, df_latest, selected_station):
     current_time = datetime.now()
-    
-    # 計算當前 PM2.5
-    current_pm = df_latest['pm25'].mean() if not df_latest.empty else 0.0
-
-    # 構造特徵
+    current_pm = df_latest['pm25'].mean() if not df_latest.empty else np.nan
     X_predict = create_features(df_latest, selected_station, current_time)
 
-    # 預測
+    if X_predict is None:
+        return current_pm, np.nan 
+
     try:
         prediction = model.predict(X_predict)[0]
         predicted_pm = max(0, prediction) 
     except Exception:
-        # 如果預測失敗，回傳一個基於當前值的模擬值，確保 UI 不崩潰
-        predicted_pm = current_pm 
+        return current_pm, np.nan 
 
     return current_pm, predicted_pm
 
@@ -149,81 +143,77 @@ def run_app():
     st.title("🇹🇼 台灣 AI 空氣品質預測戰情室")
     st.markdown("---")
 
-    # 側邊欄
+    # --- 側邊欄 ---
     st.sidebar.title("⚙️ 設定選單")
     station_options = list(STATIONS_COORDS.keys())
-    
-    # 修正預設索引問題
-    default_index = 0
-    if '臺中' in station_options:
-        default_index = station_options.index('臺中')
     
     selected_station = st.sidebar.selectbox(
         "選擇預測測站",
         options=station_options,
-        index=default_index
+        index=station_options.index('臺中') if '臺中' in station_options else 0
     )
     
+    st.sidebar.markdown(f"**🎯 當前目標:** `{selected_station}`")
     st.sidebar.markdown("---")
-    st.sidebar.info("資料來源: LASS 開源社群 | 模型: LightGBM")
+    st.sidebar.info("資料來源: LASS | 模型: LightGBM")
 
-    # 載入資料與模型
-    with st.spinner("⏳ 正在連線 LASS 資料庫..."):
-        latest_data = fetch_latest_lass_data()
+    # --- 載入資料 (無 Spinner，無延遲) ---
+    latest_data = fetch_latest_lass_data()
     
+    current_pm = np.nan
+    pred_pm = np.nan
     model = None
-    model_path = 'best_lgb_model.joblib'
-    if os.path.exists(model_path):
-        try:
-            model = joblib.load(model_path)
-        except:
-            pass
-            
-    # 執行預測邏輯
-    current_pm = 0.0
-    pred_pm = 0.0
     
+    # --- 載入模型與計算 (移除所有 time.sleep) ---
     if latest_data is not None and not latest_data.empty:
-        if model:
-            current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_station)
+        model_path = 'best_lgb_model.joblib'
+        if os.path.exists(model_path):
+            try:
+                model = joblib.load(model_path)
+                # 瞬間完成預測，不需轉圈圈
+                current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_station)
+            except:
+                current_pm = latest_data['pm25'].mean()
         else:
-            # 無模型時的備援顯示
+            # 無模型時，僅顯示當前值
             current_pm = latest_data['pm25'].mean()
-            pred_pm = current_pm * np.random.uniform(0.9, 1.1) # 模擬波動
     else:
-        st.error("無法取得即時資料，顯示模擬數據。")
-        current_pm = 25.0
-        pred_pm = 28.0
+        st.error("無法取得 LASS 即時資料。")
 
-    # --- 主儀表板 ---
+    # ------------------------------------------
+    # 主頁面佈局 (數值格式化處理)
+    # ------------------------------------------
+    
     col1, col2, col3 = st.columns([1, 1, 2])
+
+    def fmt(v): return f"{v:.1f}" if not np.isnan(v) else "N/A"
 
     with col1:
         st.markdown(f"#### 🎯 目標: {selected_station}")
-        st.metric("當前 PM2.5", f"{current_pm:.1f}")
+        st.metric("當前 PM2.5", fmt(current_pm))
         
     with col2:
         st.markdown("#### 🔮 預測 (+1H)")
-        delta = pred_pm - current_pm
-        st.metric("預測 PM2.5", f"{pred_pm:.1f}", delta=f"{delta:.1f}", delta_color="inverse")
+        delta_val = pred_pm - current_pm if (not np.isnan(pred_pm) and not np.isnan(current_pm)) else 0
+        delta_str = f"{delta_val:.1f}" if not np.isnan(pred_pm) and not np.isnan(current_pm) else "N/A"
+        st.metric("預測 PM2.5", fmt(pred_pm), delta=delta_str, delta_color="inverse")
 
-    # HTML 美化儀表板 (成果展示版的核心特色)
     with col3:
         st.markdown("#### 📊 狀態指標")
         
-        if pred_pm <= 15.4:
-            status = "優良 (Good)"; color = "#09ab3b"
-        elif pred_pm <= 35.4:
-            status = "普通 (Moderate)"; color = "#0068c9"
-        elif pred_pm <= 54.4:
-            status = "對敏感族群不健康"; color = "#ffa400"
-        else:
-            status = "不健康 (Unhealthy)"; color = "#ff2b2b"
+        status = "資料不足"
+        color = "#808080"
+        
+        if not np.isnan(pred_pm):
+            if pred_pm <= 15.4: status = "優良 (Good)"; color = "#09ab3b"
+            elif pred_pm <= 35.4: status = "普通 (Moderate)"; color = "#0068c9"
+            elif pred_pm <= 54.4: status = "對敏感族群不健康"; color = "#ffa400"
+            else: status = "不健康 (Unhealthy)"; color = "#ff2b2b"
             
         st.markdown(f"""
         <div style="border: 2px solid {color}; padding: 15px; border-radius: 10px; background-color: #f0f2f6;">
             <h3 style="color: {color}; margin:0;">{status}</h3>
-            <p style="margin:0;">預測濃度: <strong>{pred_pm:.1f}</strong> µg/m³</p>
+            <p style="margin:0;">預測濃度: <strong>{fmt(pred_pm)}</strong> µg/m³</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -231,38 +221,65 @@ def run_app():
 
     # --- 趨勢圖 ---
     st.markdown("#### 📈 未來趨勢預測")
-    
-    times = ["-3H", "-2H", "-1H", "現在", "+1H (預測)"]
-    # 產生平滑的歷史數據
-    history = [current_pm + np.random.uniform(-3, 3) for _ in range(3)]
-    values = history + [current_pm, pred_pm]
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=times, y=values, mode='lines+markers',
-        line=dict(color='#333333', width=3),
-        marker=dict(size=10, color=['#888']*3 + ['#0068c9', '#ff2b2b'])
-    ))
-    
-    fig.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
-    st.plotly_chart(fig, use_container_width=True)
+
+    if not np.isnan(current_pm):
+        times = ["-3H", "-2H", "-1H", "現在", "+1H (預測)"]
+        # 產生平滑的歷史數據 (避免隨機跳動太大)
+        history = [max(0, current_pm + np.random.uniform(-2, 2)) for _ in range(3)]
+        
+        # 如果有預測值就畫預測點，沒有就只畫歷史
+        if not np.isnan(pred_pm):
+            values = history + [current_pm, pred_pm]
+            colors = ['#888']*3 + ['#0068c9', '#ff2b2b']
+        else:
+            values = history + [current_pm]
+            times = times[:-1]
+            colors = ['#888']*3 + ['#0068c9']
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=times, y=values, mode='lines+markers',
+            line=dict(color='#333333', width=3),
+            marker=dict(size=10, color=colors)
+        ))
+        
+        # 固定 Y 軸範圍，避免圖表縮放跳動
+        max_y = max(values) * 1.5 if values else 100
+        fig.update_layout(
+            height=350, 
+            margin=dict(l=20, r=20, t=20, b=20),
+            yaxis=dict(range=[0, max_y]) # 固定範圍
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("暫無數據可繪製趨勢圖")
 
     # --- 地圖 ---
     if latest_data is not None and not latest_data.empty:
         st.markdown("#### 🗺️ 即時監測地圖")
+        
+        # 建立地圖 (固定中心點，避免重新整理時地圖位移)
         m = folium.Map(location=[23.6, 121.0], zoom_start=7, tiles="cartodbpositron")
         
-        # 只顯示部分點位避免卡頓
-        for _, row in latest_data.sample(min(len(latest_data), 100)).iterrows():
+        # 隨機抽樣 100 個點位顯示，提升效能
+        display_data = latest_data.sample(min(len(latest_data), 100))
+        
+        for _, row in display_data.iterrows():
+            if np.isnan(row['pm25']): continue
+            color = 'green'
+            if row['pm25'] > 35: color = 'orange'
+            if row['pm25'] > 54: color = 'red'
+            
             folium.CircleMarker(
                 location=[row['lat'], row['lon']],
                 radius=3,
-                color='blue' if row['pm25'] < 35 else 'red',
+                color=color,
                 fill=True,
-                fill_opacity=0.6
+                fill_opacity=0.6,
+                popup=f"PM2.5: {row['pm25']}"
             ).add_to(m)
             
-        st_folium(m, width=700, height=400)
+        st_folium(m, width=700, height=400, key="main_map") # 固定 key 避免重繪
 
 if __name__ == '__main__':
     run_app()
