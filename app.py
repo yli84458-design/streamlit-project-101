@@ -16,32 +16,27 @@ import time
 # ==========================================
 st.set_page_config(page_title="台灣 AI 空氣品質預測戰情室", layout="wide", page_icon="🍃")
 
-# 測站座標 (已修正 '台中' -> '臺中')
-STATIONS_COORDS = {
-    '台北': {'lat': 25.0330, 'lon': 121.5654},
-    '板橋': {'lat': 25.0129, 'lon': 121.4624},
-    '桃園': {'lat': 24.9976, 'lon': 121.3033},
-    '新竹': {'lat': 24.8083, 'lon': 120.9681},
-    '臺中': {'lat': 24.1477, 'lon': 120.6736}, 
-    '嘉義': {'lat': 23.4800, 'lon': 120.4491},
-    '台南': {'lat': 22.9902, 'lon': 120.2076},
-    '高雄': {'lat': 22.6322, 'lon': 120.3013},
-    '屏東': {'lat': 22.6775, 'lon': 120.4853},
-    '宜蘭': {'lat': 24.7570, 'lon': 121.7584},
-    '花蓮': {'lat': 23.9740, 'lon': 121.6056},
-    '台東': {'lat': 22.7565, 'lon': 121.1517},
-    '馬祖': {'lat': 26.1557, 'lon': 119.9577},
-}
-
 TARGET_URL = "https://pm25.lass-net.org/data/last-all-airbox.json"
 
+# Helper: 根據經緯度粗略判斷地區，用於生成 sitename
+def get_region_from_coords(lat, lon):
+    """根據經緯度，為 LASS 裝置分配一個粗略的地區名稱 (用於顯示)"""
+    if 24.5 <= lat <= 26.0 and 120.5 <= lon <= 122.0: return '北部地區'
+    if 24.0 <= lat < 24.5 and 120.0 <= lon < 121.0: return '中部地區'
+    if 23.0 <= lat < 24.0 and 120.0 <= lon < 121.0: return '嘉南地區'
+    if 22.0 <= lat < 23.0 and 120.0 <= lon < 121.0: return '高屏地區'
+    if 24.5 <= lat <= 26.0 and 121.5 <= lon <= 122.0: return '宜花地區'
+    if 22.0 <= lat < 24.0 and 121.0 <= lon < 122.0: return '東部地區'
+    return '其他地區'
+
+
 # ==========================================
-# 🛠️ 1. 爬蟲函數 (Data Fetcher)
+# 🛠️ 1. 爬蟲函數 (Data Fetcher) - [新增 device_id 和 sitename 欄位]
 # ==========================================
 
 @st.cache_data(ttl=300) # 每 5 分鐘更新一次資料
 def fetch_latest_lass_data():
-    """從 LASS 靜態資料源爬取最新的 PM2.5、溫濕度和地理位置資料。"""
+    """從 LASS 靜態資料源爬取最新的 PM2.5、溫濕度和地理位置資料，並生成 sitename。"""
     st.info(f"⏳ 嘗試從 LASS/AirBox 靜態資料源獲取數據 ({datetime.now().strftime('%H:%M:%S')})...")
     
     try:
@@ -58,6 +53,7 @@ def fetch_latest_lass_data():
         df = pd.DataFrame(records)
         
         rename_dict = {
+            'device_id': 'device_id',  # <-- 關鍵：保留 device_id
             's_d0': 'pm25',
             's_t0': 'temp', 
             's_h0': 'humidity', 
@@ -66,28 +62,39 @@ def fetch_latest_lass_data():
             'timestamp': 'time'
         }
         
-        # 確保我們嘗試保留所有需要的欄位
         cols_to_select = [col for col in rename_dict.keys() if col in df.columns]
         df_clean = df[cols_to_select].copy() 
         df_clean.rename(columns=rename_dict, inplace=True)
 
-        # 關鍵修正: 確保所有數值欄位都轉換，錯誤則設為 NaN
+        # 確保所有數值欄位都轉換，錯誤則設為 NaN
         required_cols = ['pm25', 'lat', 'lon', 'temp', 'humidity']
         for col in required_cols:
-            # 如果欄位不存在，則創建一個 NaN 欄位
             if col not in df_clean.columns:
                 df_clean[col] = np.nan
             else:
                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+        
+        # 確保 device_id 是字串
+        df_clean['device_id'] = df_clean['device_id'].astype(str)
 
         # 過濾異常值 (台灣範圍 + 合理 PM2.5)
         df_clean = df_clean[
             (df_clean['lat'].between(21, 26)) &
             (df_clean['lon'].between(119, 123)) &
             (df_clean['pm25'].between(0, 1000))
-        ].dropna(subset=['lat', 'lon']).reset_index(drop=True)
+        ].dropna(subset=['lat', 'lon', 'device_id']).reset_index(drop=True)
 
-        st.success(f"✅ LASS 資料爬取與清理成功！取得 {len(df_clean):,} 筆有效數據。")
+        # --- 關鍵：生成 sitename 欄位 ---
+        df_clean['region'] = df_clean.apply(
+            lambda row: get_region_from_coords(row['lat'], row['lon']), axis=1
+        )
+        # sitename 格式：[縣市/地區] - 裝置ID尾碼:[XXXX]
+        df_clean['sitename'] = df_clean.apply(
+            lambda row: f"{row['region']} - ID尾碼:{str(row['device_id'])[:4]}", axis=1
+        )
+
+
+        st.success(f"✅ LASS 資料爬取與清理成功！取得 {len(df_clean):,} 筆有效站點數據。")
         return df_clean
 
     except requests.exceptions.RequestException as e:
@@ -98,34 +105,44 @@ def fetch_latest_lass_data():
         return None
 
 # ==========================================
-# ⚙️ 2. 資料處理與模型預測 (Data Processing & Prediction)
+# ⚙️ 2. 資料處理與模型預測 - [修改為單一站點數據]
 # ==========================================
 
-def create_features(df, station_name, current_time):
+def create_features(df_latest, selected_sitename, current_time):
     """
-    對單一小時的 LASS 數據進行特徵工程，CRITICAL FIX: 檢查 NaN 值。
+    對單一 LASS 裝置的數據進行特徵工程。
     """
     
-    # 僅對非 NaN 的數據計算平均值
-    avg_pm25 = df['pm25'].mean()
-    avg_temp = df['temp'].mean()
-    avg_humid = df['humidity'].mean()
+    # 1. 過濾出選定的裝置數據 (應該只有一行)
+    df_device = df_latest[df_latest['sitename'] == selected_sitename]
     
-    # CRITICAL FIX: 如果任何一個關鍵特徵是 NaN 或無限大，則無法進行預測
+    if df_device.empty:
+        st.warning(f"⚠️ 找不到站點 '{selected_sitename}' 的即時數據。")
+        return None
+
+    # 2. 提取關鍵單一數值
+    # 使用 .iloc[0] 確保只取第一行（如果有多個同名 sitename，取最新的/第一個）
+    device_data = df_device.iloc[0] 
+    
+    avg_pm25 = device_data.get('pm25', np.nan)
+    avg_temp = device_data.get('temp', np.nan)
+    avg_humid = device_data.get('humidity', np.nan)
+    
+    # 3. 穩定性檢查: 確保關鍵數值有效 (CRITICAL FIX)
     if not all(np.isfinite([avg_pm25, avg_temp, avg_humid])):
-         # 數據不足或無效，返回 None
-         st.warning("⚠️ LASS 數據中缺少 PM2.5, 溫度或濕度的平均值。無法構造完整的預測特徵。")
+         st.warning("⚠️ 選定站點缺少 PM2.5, 溫度或濕度的有效數據。無法構造完整的預測特徵。")
          return None
 
-    # 獲取測站座標
-    coords = STATIONS_COORDS.get(station_name, {'lat': 0, 'lon': 0}) 
-
+    # 4. 獲取測站座標
+    coords = {'lat': device_data.get('lat', np.nan), 'lon': device_data.get('lon', np.nan)}
+    
     # 構造特徵 DataFrame
     features = {
         'pm25_t0': avg_pm25,         
         'temp_t0': avg_temp,         
         'humid_t0': avg_humid,       
         
+        # 使用裝置自身的經緯度作為地理特徵
         'Station_lat': coords['lat'],
         'Station_lon': coords['lon'],
         
@@ -147,19 +164,20 @@ def create_features(df, station_name, current_time):
     return X
 
 
-def predict_pm25_plus_1h(model, df_latest, selected_station):
+def predict_pm25_plus_1h(model, df_latest, selected_sitename):
     """
-    使用模型預測選定測站下一小時 (t+1) 的 PM2.5。
+    使用模型預測選定站點下一小時 (t+1) 的 PM2.5。
     """
     current_time = datetime.now() 
     
-    # 1. 計算當前 PM2.5
-    current_pm = df_latest['pm25'].mean() if not df_latest.empty and 'pm25' in df_latest.columns else np.nan
+    # 1. 獲取當前 PM2.5
+    df_device = df_latest[df_latest['sitename'] == selected_sitename]
+    current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
 
     # 2. 構造模型特徵
-    X_predict = create_features(df_latest, selected_station, current_time)
+    X_predict = create_features(df_latest, selected_sitename, current_time)
 
-    # 如果特徵構造失敗 (例如 LASS 數據全為 NaN)，直接返回
+    # 如果特徵構造失敗，直接返回
     if X_predict is None:
         return current_pm, np.nan 
 
@@ -188,66 +206,72 @@ def run_app():
     # 側邊欄設定 (Side Bar)
     # ------------------------------------------
     st.sidebar.title("⚙️ 設定選單")
-    station_options = list(STATIONS_COORDS.keys())
     
-    # 選擇測站 (側邊欄元件)
-    selected_station = st.sidebar.selectbox(
-        "選擇預測測站 (影響地理特徵)",
-        options=station_options,
-        index=station_options.index('臺中') if '臺中' in station_options else 0
-    )
+    # 初始化站點選擇
+    selected_sitename = None
     
+    # 爬取資料
+    with st.spinner(f"⏳ 正在爬取即時空氣品質資料 ({datetime.now().strftime('%H:%M:%S')})..."):
+        time.sleep(1) 
+        latest_data = fetch_latest_lass_data()
+
+    if latest_data is not None and not latest_data.empty:
+        # 選擇站點 (側邊欄元件) - 使用動態生成的 sitename
+        sitename_options = sorted(latest_data['sitename'].unique().tolist())
+        
+        selected_sitename = st.sidebar.selectbox(
+            "選擇預測站點 (LASS 裝置)",
+            options=sitename_options,
+            index=0 # 預設選擇第一個
+        )
+    else:
+        st.error("❌ 無法取得有效的 LASS/AirBox 資料。請稍後再試。")
+
+
     # 側邊欄資訊
-    st.sidebar.markdown(f"**🎯 當前目標:** `{selected_station}`")
+    st.sidebar.markdown(f"**🎯 當前目標:** `{selected_sitename if selected_sitename else 'N/A'}`")
     st.sidebar.markdown("---")
     st.sidebar.markdown(
         """
         **數據來源:** LASS/AirBox 感測器網路 (即時數據)  
         **AI 模型:** LightGBM  
-        **預測目標:** 選定測站下一小時 (t+1) PM2.5
+        **預測目標:** 選定站點下一小時 (t+1) PM2.5
         """
     )
     st.sidebar.markdown("---")
     
-    # 初始化變數
+    # 初始化預測變數
     current_pm = np.nan
     pred_pm = np.nan
     model = None
     
-    # 爬取資料
-    with st.spinner(f"⏳ 正在爬取即時空氣品質資料 ({datetime.now().strftime('%H:%M:%S')})..."):
-        # 讓 Streamlit 顯示 spinner 
-        time.sleep(1) 
-        latest_data = fetch_latest_lass_data()
-        
-    if latest_data is None or latest_data.empty:
-        st.error("❌ 無法取得有效的 LASS/AirBox 資料。預測將顯示 N/A。")
-    else:
+    # ------------------------------------------
+    # 預測邏輯 (Prediction Logic)
+    # ------------------------------------------
+    if selected_sitename:
         # 載入模型
         model_path = 'best_lgb_model.joblib'
         if not os.path.exists(model_path):
-            st.warning(f"⚠️ 找不到模型檔案: {model_path}。請先執行訓練腳本並將其儲存到根目錄。")
-            current_pm = latest_data['pm25'].mean() if 'pm25' in latest_data.columns else np.nan
+            st.warning(f"⚠️ 找不到模型檔案: {model_path}。請先執行訓練腳本。")
+            # 即使沒有模型，仍嘗試獲取當前 PM2.5
+            df_device = latest_data[latest_data['sitename'] == selected_sitename]
+            current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
         else:
             try:
                 model = joblib.load(model_path)
             except Exception as e:
                 st.warning(f"⚠️ 模型載入失敗: {e}。請檢查檔案格式。")
-                current_pm = latest_data['pm25'].mean() if 'pm25' in latest_data.columns else np.nan
+                df_device = latest_data[latest_data['sitename'] == selected_sitename]
+                current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
                 
             # 執行預測 (只有在模型載入成功時才執行)
             if model:
                 with st.spinner("🧠 正在使用 AI 模型進行預測..."):
                     time.sleep(1) # 模擬預測所需時間
-                    # 預測函數現在會自動處理數據缺失問題，並返回 np.nan
-                    current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_station)
-
-    # ------------------------------------------
-    # 4. 主頁面佈局
-    # ------------------------------------------
+                    # 預測函數會自動處理數據缺失問題，並返回 np.nan
+                    current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_sitename)
     
-    col1, col2, col3 = st.columns([1, 1, 2])
-
+    
     # --- 格式化顯示數值 ---
     def format_value(value):
         return f"{value:.1f}" if not np.isnan(value) else "N/A"
@@ -256,11 +280,17 @@ def run_app():
     pred_pm_display = format_value(pred_pm)
 
 
+    # ------------------------------------------
+    # 4. 主頁面佈局
+    # ------------------------------------------
+    
+    col1, col2, col3 = st.columns([1, 1, 2])
+
     # --- Col 1: 當前 PM2.5 ---
     with col1:
-        st.markdown(f"#### 🎯 預測目標: {selected_station}")
+        st.markdown(f"#### 🎯 預測目標: {selected_sitename if selected_sitename else '請選擇站點'}")
         st.metric(
-            label="當前區域 LASS 感測器平均 PM2.5 (µg/m³)", 
+            label="選定站點當前 PM2.5 (µg/m³)", 
             value=current_pm_display,
             delta_color="off"
         )
@@ -318,7 +348,7 @@ def run_app():
                 background-color: #f0f2f6;
                 box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
             ">
-                <p style="font-size: 16px; margin: 0; color: #555;">AI 預測空氣品質狀態 ({selected_station} t+1H)</p>
+                <p style="font-size: 16px; margin: 0; color: #555;">AI 預測空氣品質狀態 ({selected_sitename if selected_sitename else 'N/A'} t+1H)</p>
                 <h3 style="color: {color_code}; margin-top: 5px;">{status_text}</h3>
                 <div style="display: flex; justify-content: space-between;">
                     <div>
@@ -343,13 +373,13 @@ def run_app():
     # ------------------------------------------
     # 5. 趨勢圖 (Trend Plot)
     # ------------------------------------------
-    st.markdown("#### 📈 區域 PM2.5 趨勢概覽")
+    st.markdown("#### 📈 選定站點 PM2.5 趨勢概覽")
 
     if not np.isnan(current_pm) and not np.isnan(pred_pm):
-        # 構造數據 (基於 LASS 均值和預測值)
+        # 構造數據 (基於單一站點的當前值和預測值)
         times = ["-3H", "-2H", "-1H", "現在", "+1H (AI 預測)"]
         
-        # 模擬過去數據波動 (確保歷史數據也是有效數值)
+        # 模擬過去數據波動 (基於當前值產生合理的歷史數據)
         history = [current_pm + np.random.uniform(-5, 5) for _ in range(3)] 
         history = [max(0, x) for x in history]
 
@@ -387,7 +417,7 @@ def run_app():
 
 
         fig.update_layout(
-            title_text='未來一小時 PM2.5 預測與歷史趨勢',
+            title_text=f'站點 {selected_sitename} 未來一小時 PM2.5 預測與歷史趨勢',
             xaxis_title="時間",
             yaxis_title="PM2.5 (µg/m³)",
             height=400,
@@ -398,7 +428,7 @@ def run_app():
 
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("⚠️ 無法繪製趨勢圖。請檢查資料來源或模型是否成功執行預測。")
+        st.warning("⚠️ 無法繪製趨勢圖。請選擇站點或檢查資料來源。")
 
     st.markdown("---")
     
@@ -425,17 +455,19 @@ def run_app():
             pm_value = row.get('pm25', np.nan)
             temp_value = row.get('temp', np.nan)
             humid_value = row.get('humidity', np.nan)
+            sitename_value = row.get('sitename', '未知站點')
 
             if np.isfinite(row['lat']) and np.isfinite(row['lon']):
                 pm_color = get_pm25_color(pm_value)
                 
                 popup_html = f"""
-                <b>PM2.5: {format_value(pm_value)}</b> µg/m³<br>
+                <b>站點: {sitename_value}</b><br>
+                PM2.5: {format_value(pm_value)} µg/m³<br>
                 溫度: {format_value(temp_value)} °C<br>
                 濕度: {format_value(humid_value)} %
                 """
                 
-                folium.CircleMarker(
+                marker = folium.CircleMarker(
                     location=[row['lat'], row['lon']],
                     radius=5,
                     color=pm_color,
@@ -443,19 +475,18 @@ def run_app():
                     fill_color=pm_color,
                     fill_opacity=0.7,
                     popup=folium.Popup(popup_html, max_width=300)
-                ).add_to(m)
+                )
 
-        # 標記選定的預測測站
-        station_coords = STATIONS_COORDS.get(selected_station)
-        if station_coords:
-            marker_color = 'purple'
-            marker_popup_text = f"🎯 **AI 預測目標:** {selected_station}<br>預測 PM2.5: {pred_pm_display}"
+                # 突出顯示選定的站點
+                if sitename_value == selected_sitename:
+                    # 使用 Star Marker 標記預測目標
+                    folium.Marker(
+                        location=[row['lat'], row['lon']],
+                        icon=folium.Icon(color='purple', icon='star'),
+                        popup=folium.Popup(f"🎯 **AI 預測目標:** {selected_sitename}", max_width=300)
+                    ).add_to(m)
 
-            folium.Marker(
-                location=[station_coords['lat'], station_coords['lon']],
-                popup=marker_popup_text,
-                icon=folium.Icon(color=marker_color, icon='star')
-            ).add_to(m)
+                marker.add_to(m)
 
 
         # 將地圖顯示在 Streamlit 中
