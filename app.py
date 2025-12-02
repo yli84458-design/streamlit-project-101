@@ -6,7 +6,7 @@ import joblib
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os
+import os # <--- 偵錯所需函式庫
 
 # ==========================================
 # 1. 系統設定與快取
@@ -65,7 +65,7 @@ def get_lass_data():
         return df.dropna(subset=['pm25', 'lat', 'lon'])
         
     except Exception as e:
-        st.error(f"LASS 資料抓取失敗: {e}")
+        # st.error(f"LASS 資料抓取失敗: {e}") # 避免過多錯誤訊息洗版
         return pd.DataFrame()
 
 @st.cache_resource
@@ -91,10 +91,12 @@ def load_historical_data():
     讀取合併後的歷史數據 (預期檔名: all_pm25_7days.csv)
     來源: EPA 和 LASS 資料合併對齊並儲存至 all_pm25_7days.csv.txt
     """
-    file_path = 'all_pm25_7days.csv' 
+    file_path = 'all_pm25_7days.csv'
     if os.path.exists(file_path):
         try:
+            # 由於這是大檔案，使用 chunksize 讀取 (雖然 Streamlit 可能會快取)
             df = pd.read_csv(file_path, low_memory=False)
+            
             if 'Timestamp_Aligned_Hour' in df.columns:
                 df['time'] = pd.to_datetime(df['Timestamp_Aligned_Hour'])
             elif 'time' in df.columns:
@@ -129,6 +131,18 @@ with st.sidebar:
     st.write(f"🟢 LASS 連線: {'正常' if not df_live.empty else '異常 (正在重試...)'}")
     st.write(f"🟢 歷史資料庫: {'已載入' if not df_hist.empty else '未找到 all_pm25_7days.csv'}")
     st.write(f"🟢 AI 模型: {'已就緒' if model else '未找到 model.pkl'}")
+    
+    # 檔案偵錯區塊 (NEW)
+    st.markdown("---")
+    st.markdown("### 🔍 檔案偵錯 (Debug)")
+    try:
+        # 列出 Streamlit 應用程式運行目錄下的所有檔案
+        current_files = os.listdir('.')
+        st.caption("專案根目錄中的檔案:")
+        st.code('\n'.join(current_files), language='text')
+    except Exception as e:
+        st.error(f"偵錯失敗: {e}")
+
 
 # --- 頁面 1: 即時戰情室 ---
 if page == "即時戰情室":
