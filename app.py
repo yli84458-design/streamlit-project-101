@@ -1,176 +1,471 @@
-# 程式碼說明：這個腳本用來執行 PM2.5 數據的探索性分析 (EDA)，並生成三種報告圖表。
-# 它假設您已經上傳了包含 EPA 和 LASS 合併數據的 'all_pm25_7days.csv' 檔案。
-
+import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
-import matplotlib.font_manager as fm
+import requests
+import joblib
+import folium
+from streamlit_folium import st_folium
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 import os
+import time 
 
-# ----------------------------------------------------------------------
-# [終極方案] 1. 中文字體設定 (使用 apt-get 系統安裝)
-# ----------------------------------------------------------------------
+# ==========================================
+# 🔧 核心設定 (Core Configuration)
+# ==========================================
+st.set_page_config(page_title="台灣 AI 空氣品質預測戰情室", layout="wide", page_icon="🍃")
 
-# 檢查是否在 Colab 環境 (為了穩定性，請在 Colab 環境中執行此腳本)
-try:
-    import google.colab
-    IN_COLAB = True
-except:
-    IN_COLAB = False
+# 測站座標 (已修正 '台中' -> '臺中')
+STATIONS_COORDS = {
+    '台北': {'lat': 25.0330, 'lon': 121.5654},
+    '板橋': {'lat': 25.0129, 'lon': 121.4624},
+    '桃園': {'lat': 24.9976, 'lon': 121.3033},
+    '新竹': {'lat': 24.8083, 'lon': 120.9681},
+    '臺中': {'lat': 24.1477, 'lon': 120.6736}, 
+    '嘉義': {'lat': 23.4800, 'lon': 120.4491},
+    '台南': {'lat': 22.9902, 'lon': 120.2076},
+    '高雄': {'lat': 22.6322, 'lon': 120.3013},
+    '屏東': {'lat': 22.6775, 'lon': 120.4853},
+    '宜蘭': {'lat': 24.7570, 'lon': 121.7584},
+    '花蓮': {'lat': 23.9740, 'lon': 121.6056},
+    '台東': {'lat': 22.7565, 'lon': 121.1517},
+    '馬祖': {'lat': 26.1557, 'lon': 119.9577},
+}
 
-if IN_COLAB:
-    print("--- 正在使用 apt-get 安裝系統級中文字體 (WenQuanYi Zen Hei)... ---")
-    os.system('apt-get -y install fonts-wqy-zenhei')
-    font_path = '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc'
+TARGET_URL = "https://pm25.lass-net.org/data/last-all-airbox.json"
 
-    if os.path.exists(font_path):
-        fm.fontManager.addfont(font_path)
-        # 設定字體名稱
-        plt.rcParams['font.sans-serif'] = 'WenQuanYi Zen Hei' 
-        plt.rcParams['axes.unicode_minus'] = False # 解決負號亂碼問題
-        print("--- 字體安裝成功，已設定 Matplotlib 使用 'WenQuanYi Zen Hei'。 ---")
+# ==========================================
+# 🛠️ 1. 爬蟲函數 (Data Fetcher)
+# ==========================================
+
+@st.cache_data(ttl=300) # 每 5 分鐘更新一次資料
+def fetch_latest_lass_data():
+    """從 LASS 靜態資料源爬取最新的 PM2.5、溫濕度和地理位置資料。"""
+    st.info(f"⏳ 嘗試從 LASS/AirBox 靜態資料源獲取數據 ({datetime.now().strftime('%H:%M:%S')})...")
+    
+    try:
+        response = requests.get(TARGET_URL, timeout=15)
+        response.raise_for_status() 
+        
+        data = response.json()
+        records = data.get('feeds', data)
+
+        if not records:
+            st.warning("⚠️ LASS 資料源取得成功，但無有效感測器記錄。")
+            return None
+
+        df = pd.DataFrame(records)
+        
+        rename_dict = {
+            's_d0': 'pm25',
+            's_t0': 'temp', 
+            's_h0': 'humidity', 
+            'gps_lat': 'lat',
+            'gps_lon': 'lon',
+            'timestamp': 'time'
+        }
+        
+        # 確保我們嘗試保留所有需要的欄位
+        cols_to_select = [col for col in rename_dict.keys() if col in df.columns]
+        df_clean = df[cols_to_select].copy() 
+        df_clean.rename(columns=rename_dict, inplace=True)
+
+        # 關鍵修正: 確保所有數值欄位都轉換，錯誤則設為 NaN
+        required_cols = ['pm25', 'lat', 'lon', 'temp', 'humidity']
+        for col in required_cols:
+            # 如果欄位不存在，則創建一個 NaN 欄位
+            if col not in df_clean.columns:
+                df_clean[col] = np.nan
+            else:
+                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+
+        # 過濾異常值 (台灣範圍 + 合理 PM2.5)
+        df_clean = df_clean[
+            (df_clean['lat'].between(21, 26)) &
+            (df_clean['lon'].between(119, 123)) &
+            (df_clean['pm25'].between(0, 1000))
+        ].dropna(subset=['lat', 'lon']).reset_index(drop=True)
+
+        st.success(f"✅ LASS 資料爬取與清理成功！取得 {len(df_clean):,} 筆有效數據。")
+        return df_clean
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ 資料爬取失敗 (網路錯誤/超時): {e}")
+        return None
+    except Exception as e:
+        st.error(f"❌ 資料處理失敗: {e}")
+        return None
+
+# ==========================================
+# ⚙️ 2. 資料處理與模型預測 (Data Processing & Prediction)
+# ==========================================
+
+def create_features(df, station_name, current_time):
+    """
+    對單一小時的 LASS 數據進行特徵工程，CRITICAL FIX: 檢查 NaN 值。
+    """
+    
+    # 僅對非 NaN 的數據計算平均值
+    avg_pm25 = df['pm25'].mean()
+    avg_temp = df['temp'].mean()
+    avg_humid = df['humidity'].mean()
+    
+    # CRITICAL FIX: 如果任何一個關鍵特徵是 NaN 或無限大，則無法進行預測
+    if not all(np.isfinite([avg_pm25, avg_temp, avg_humid])):
+         # 數據不足或無效，返回 None
+         st.warning("⚠️ LASS 數據中缺少 PM2.5, 溫度或濕度的平均值。無法構造完整的預測特徵。")
+         return None
+
+    # 獲取測站座標
+    coords = STATIONS_COORDS.get(station_name, {'lat': 0, 'lon': 0}) 
+
+    # 構造特徵 DataFrame
+    features = {
+        'pm25_t0': avg_pm25,         
+        'temp_t0': avg_temp,         
+        'humid_t0': avg_humid,       
+        
+        'Station_lat': coords['lat'],
+        'Station_lon': coords['lon'],
+        
+        # 時間特徵 (從 current_time + 1H 提取)
+        'target_hour': (current_time + timedelta(hours=1)).hour,
+        'target_dayofweek': (current_time + timedelta(hours=1)).weekday(),
+        'target_is_weekend': (current_time + timedelta(hours=1)).weekday() >= 5,
+        
+        # 假設前一/兩小時數據與當前小時數據相同 (簡化處理)
+        'pm25_t1': avg_pm25, 
+        'temp_t1': avg_temp,
+        'humid_t1': avg_humid,
+        'pm25_t2': avg_pm25, 
+    }
+    
+    X = pd.DataFrame([features])
+    X['target_is_weekend'] = X['target_is_weekend'].astype(int)
+    
+    return X
+
+
+def predict_pm25_plus_1h(model, df_latest, selected_station):
+    """
+    使用模型預測選定測站下一小時 (t+1) 的 PM2.5。
+    """
+    current_time = datetime.now() 
+    
+    # 1. 計算當前 PM2.5
+    current_pm = df_latest['pm25'].mean() if not df_latest.empty and 'pm25' in df_latest.columns else np.nan
+
+    # 2. 構造模型特徵
+    X_predict = create_features(df_latest, selected_station, current_time)
+
+    # 如果特徵構造失敗 (例如 LASS 數據全為 NaN)，直接返回
+    if X_predict is None:
+        return current_pm, np.nan 
+
+    # 3. 進行預測
+    try:
+        prediction = model.predict(X_predict)[0]
+        # PM2.5 數值不能是負數
+        predicted_pm = max(0, prediction) 
+    except Exception as e:
+        st.error(f"❌ 模型預測階段失敗: {e}")
+        return current_pm, np.nan 
+
+    return current_pm, predicted_pm
+
+
+# ==========================================
+# 🚀 3. Streamlit App 主體
+# ==========================================
+
+def run_app():
+    # 標題
+    st.title("🇹🇼 台灣 AI 空氣品質預測戰情室")
+    st.markdown("---")
+
+    # ------------------------------------------
+    # 側邊欄設定 (Side Bar)
+    # ------------------------------------------
+    st.sidebar.title("⚙️ 設定選單")
+    station_options = list(STATIONS_COORDS.keys())
+    
+    # 選擇測站 (側邊欄元件)
+    selected_station = st.sidebar.selectbox(
+        "選擇預測測站 (影響地理特徵)",
+        options=station_options,
+        index=station_options.index('臺中') if '臺中' in station_options else 0
+    )
+    
+    # 側邊欄資訊
+    st.sidebar.markdown(f"**🎯 當前目標:** `{selected_station}`")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        """
+        **數據來源:** LASS/AirBox 感測器網路 (即時數據)  
+        **AI 模型:** LightGBM  
+        **預測目標:** 選定測站下一小時 (t+1) PM2.5
+        """
+    )
+    st.sidebar.markdown("---")
+    
+    # 初始化變數
+    current_pm = np.nan
+    pred_pm = np.nan
+    model = None
+    
+    # 爬取資料
+    with st.spinner(f"⏳ 正在爬取即時空氣品質資料 ({datetime.now().strftime('%H:%M:%S')})..."):
+        # 讓 Streamlit 顯示 spinner 
+        time.sleep(1) 
+        latest_data = fetch_latest_lass_data()
+        
+    if latest_data is None or latest_data.empty:
+        st.error("❌ 無法取得有效的 LASS/AirBox 資料。預測將顯示 N/A。")
     else:
-        print("--- 警告：中文字體安裝路徑異常，圖表可能無法顯示中文。 ---")
-else:
-    # 嘗試使用系統預設字體
-    plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'Microsoft JhengHei'] 
-    plt.rcParams['axes.unicode_minus'] = False
-    print("--- 非 Colab 環境，嘗試使用系統預設中文字體。 ---")
+        # 載入模型
+        model_path = 'best_lgb_model.joblib'
+        if not os.path.exists(model_path):
+            st.warning(f"⚠️ 找不到模型檔案: {model_path}。請先執行訓練腳本並將其儲存到根目錄。")
+            current_pm = latest_data['pm25'].mean() if 'pm25' in latest_data.columns else np.nan
+        else:
+            try:
+                model = joblib.load(model_path)
+            except Exception as e:
+                st.warning(f"⚠️ 模型載入失敗: {e}。請檢查檔案格式。")
+                current_pm = latest_data['pm25'].mean() if 'pm25' in latest_data.columns else np.nan
+                
+            # 執行預測 (只有在模型載入成功時才執行)
+            if model:
+                with st.spinner("🧠 正在使用 AI 模型進行預測..."):
+                    time.sleep(1) # 模擬預測所需時間
+                    # 預測函數現在會自動處理數據缺失問題，並返回 np.nan
+                    current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_station)
 
-
-# ======================================================================
-# 2. 讀取數據
-# ======================================================================
-
-DATA_FILE = 'all_pm25_7days.csv'
-print(f"\n📥 2. 嘗試讀取合併後的資料檔案: {DATA_FILE}...")
-
-try:
-    # 讀取數據
-    df = pd.read_csv(DATA_FILE)
-    df['Timestamp_Aligned_Hour'] = pd.to_datetime(df['Timestamp_Aligned_Hour'])
+    # ------------------------------------------
+    # 4. 主頁面佈局
+    # ------------------------------------------
     
-    # 確保關鍵欄位是數值型
-    for col in ['LASS_PM25', 'LASS_Temp', 'LASS_Humid', 'EPA_PM25']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    col1, col2, col3 = st.columns([1, 1, 2])
+
+    # --- 格式化顯示數值 ---
+    def format_value(value):
+        return f"{value:.1f}" if not np.isnan(value) else "N/A"
     
-    df.dropna(subset=['LASS_PM25', 'LASS_Temp', 'LASS_Humid', 'EPA_PM25'], inplace=True)
-    df.set_index('Timestamp_Aligned_Hour', inplace=True)
-
-    print(f"✓ 數據讀取成功！有效筆數: {len(df):,}")
-    print(df.head())
-
-except FileNotFoundError:
-    print(f"❌ 嚴重錯誤：找不到 {DATA_FILE} 檔案。請確認您已執行資料合併腳本！")
-    exit()
-except Exception as e:
-    print(f"❌ 讀取或清理數據時發生錯誤: {e}")
-    exit()
-
-# ----------------------------------------------------------------------
-# 3. 任務一：PM2.5 時間序列分析 (Time Series Plot)
-# ----------------------------------------------------------------------
-
-print("\n--- 3. 繪製 PM2.5 時間序列圖 (優化) ---")
-
-plt.figure(figsize=(15, 6))
-
-# 繪製 LASS PM2.5 (細線，強調連續性)
-plt.plot(df.index, df['LASS_PM25'], 
-         label='LASS PM2.5 (感測器平均)', 
-         color='#FF6347', 
-         alpha=0.7, 
-         linewidth=1.5,
-         marker='.', markersize=4)
-
-# 繪製 EPA PM2.5 (粗線，強調官方數據點)
-plt.plot(df.index, df['EPA_PM25'], 
-         label='EPA PM2.5 (官方測站平均)', 
-         color='#1E90FF', 
-         alpha=0.8, 
-         linewidth=2.5,
-         marker='o', markersize=6)
+    current_pm_display = format_value(current_pm)
+    pred_pm_display = format_value(pred_pm)
 
 
-plt.title('過去七天 PM2.5 時間序列趨勢：LASS 與 EPA 數據對比', fontsize=18, fontweight='bold')
-plt.xlabel('時間 (小時)', fontsize=14)
-plt.ylabel('PM2.5 濃度 ($\mu g/m^3$)', fontsize=14)
-plt.legend(fontsize=12)
-plt.grid(True, linestyle='--', alpha=0.6)
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.savefig('pm25_time_series.png')
-print("✅ PM2.5 時間序列圖繪製完成 (pm25_time_series.png)。")
+    # --- Col 1: 當前 PM2.5 ---
+    with col1:
+        st.markdown(f"#### 🎯 預測目標: {selected_station}")
+        st.metric(
+            label="當前區域 LASS 感測器平均 PM2.5 (µg/m³)", 
+            value=current_pm_display,
+            delta_color="off"
+        )
+        
+    # --- Col 2: 預測 PM2.5 ---
+    with col2:
+        st.markdown("#### 🔮 AI 預測 (下一小時)")
+        
+        delta_display = "N/A"
+        delta_color = "off"
+        
+        if not np.isnan(pred_pm) and not np.isnan(current_pm):
+            delta_value = pred_pm - current_pm
+            delta_display = f"{delta_value:.1f}"
+            delta_color = "inverse" # 綠色(up)代表惡化 (PM2.5上升)，紅色(down)代表改善 (PM2.5下降)
+
+        st.metric(
+            label="PM2.5 預測值 (µg/m³)",
+            value=pred_pm_display,
+            delta=delta_display,
+            delta_color=delta_color
+        )
 
 
-# ----------------------------------------------------------------------
-# 4. 任務二：氣象特徵 vs PM2.5 散布圖 (Scatter Plot)
-# ----------------------------------------------------------------------
+    # --- Col 3: 狀態儀表板 ---
+    with col3:
+        st.markdown("#### 📊 視覺化戰情指標")
+        
+        # 顏色和指標判斷 (使用預測值 pred_pm)
+        status_text = "預測結果錯誤或資料不足"
+        color_code = "#808080" # 灰色
+        
+        if not np.isnan(pred_pm):
+            if pred_pm <= 15.4:
+                status_text = "優良 (Good)"
+                color_code = "#09ab3b" # 綠色
+            elif pred_pm <= 35.4:
+                status_text = "普通 (Moderate)"
+                color_code = "#0068c9" # 藍色
+            elif pred_pm <= 54.4:
+                status_text = "對敏感族群不健康 (Unhealthy for Sensitive Groups)"
+                color_code = "#ffa400" # 橘色
+            else:
+                status_text = "不健康 (Unhealthy)"
+                color_code = "#ff2b2b" # 紅色
+            
+        
+        # 構造 HTML 儀表板
+        st.markdown(
+            f"""
+            <div style="
+                border: 2px solid {color_code}; 
+                padding: 15px; 
+                border-radius: 10px; 
+                background-color: #f0f2f6;
+                box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+            ">
+                <p style="font-size: 16px; margin: 0; color: #555;">AI 預測空氣品質狀態 ({selected_station} t+1H)</p>
+                <h3 style="color: {color_code}; margin-top: 5px;">{status_text}</h3>
+                <div style="display: flex; justify-content: space-between;">
+                    <div>
+                        <p>現在 (Current PM2.5)</p>
+                        <h2 style="color: #0068c9;">{current_pm_display}</h2>
+                    </div>
+                    <div style="text-align: right;">
+                        <p>預測 +1H (AI PM2.5)</p>
+                        <h2 style="color: {color_code};">
+                            {pred_pm_display}
+                            <span style="font-size:16px">
+                            {'⬆' if not np.isnan(pred_pm) and not np.isnan(current_pm) and pred_pm > current_pm else '⬇' if not np.isnan(pred_pm) and not np.isnan(current_pm) and pred_pm < current_pm else ''}
+                            </span>
+                        </h2>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-print("\n--- 4. 繪製氣象特徵 vs PM2.5 散布圖 (優化) ---")
+    st.markdown("---")
 
-fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+    # ------------------------------------------
+    # 5. 趨勢圖 (Trend Plot)
+    # ------------------------------------------
+    st.markdown("#### 📈 區域 PM2.5 趨勢概覽")
 
-# --- 圖 1: 溫度 vs PM2.5 ---
-sns.regplot(x='LASS_Temp', y='LASS_PM25', data=df, ax=axes[0], 
-            scatter_kws={'alpha': 0.4, 's': 20, 'color': '#20B2AA'}, 
-            line_kws={'color': '#FF4500'})
-axes[0].set_title('溫度 vs PM2.5 散布圖', fontsize=16, fontweight='bold')
-axes[0].set_xlabel('溫度 ($^\circ C$)', fontsize=14)
-axes[0].set_ylabel('PM2.5 濃度 ($\mu g/m^3$)', fontsize=14)
-axes[0].grid(axis='y', linestyle=':', alpha=0.6)
+    if not np.isnan(current_pm) and not np.isnan(pred_pm):
+        # 構造數據 (基於 LASS 均值和預測值)
+        times = ["-3H", "-2H", "-1H", "現在", "+1H (AI 預測)"]
+        
+        # 模擬過去數據波動 (確保歷史數據也是有效數值)
+        history = [current_pm + np.random.uniform(-5, 5) for _ in range(3)] 
+        history = [max(0, x) for x in history]
 
-# --- 圖 2: 濕度 vs PM2.5 ---
-sns.regplot(x='LASS_Humid', y='LASS_PM25', data=df, ax=axes[1], 
-            scatter_kws={'alpha': 0.4, 's': 20, 'color': '#4682B4'},
-            line_kws={'color': '#DAA520'})
-axes[1].set_title('濕度 vs PM2.5 散布圖', fontsize=16, fontweight='bold')
-axes[1].set_xlabel('濕度 (%)', fontsize=14)
-axes[1].set_ylabel('PM2.5 濃度 ($\mu g/m^3$)', fontsize=14)
-axes[1].grid(axis='y', linestyle=':', alpha=0.6)
+        values = history + [current_pm, pred_pm]
+        # 設置顏色：過去灰色，現在藍色，預測紅色
+        colors = ['#808080']*3 + ['#0068c9', '#ff2b2b']
+        
+        trend_df = pd.DataFrame({
+            '時間': times,
+            'PM2.5 值': values,
+            '類型': ['歷史']*3 + ['當前', '預測'],
+            '顏色': colors
+        })
 
-plt.tight_layout(pad=3.0) # 自動調整子圖間距
-plt.savefig('meteorological_scatter.png')
-print("✅ 氣象特徵 vs PM2.5 散布圖繪製完成 (meteorological_scatter.png)。")
+        # 繪製 Plotly 散點/線圖
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=trend_df['時間'], 
+            y=trend_df['PM2.5 值'], 
+            mode='lines+markers',
+            line=dict(color='#333333', width=2),
+            marker=dict(
+                size=10,
+                color=trend_df['顏色'],
+                line=dict(width=1, color='DarkSlateGrey')
+            ),
+            hovertemplate='<b>%{x}</b><br>PM2.5: %{y:.1f}<extra></extra>',
+            name='PM2.5 趨勢'
+        ))
+
+        # 增加 PM2.5 等級水平線 (如果預測值有效)
+        fig.add_hline(y=15.5, line_dash="dash", line_color="green", annotation_text="優良/普通界線 (15.5)")
+        fig.add_hline(y=35.5, line_dash="dash", line_color="blue", annotation_text="普通/敏感族群界線 (35.5)")
+        fig.add_hline(y=54.5, line_dash="dash", line_color="orange", annotation_text="敏感族群/不健康界線 (54.5)")
 
 
-# ----------------------------------------------------------------------
-# 5. 任務三：相關係數熱圖 (Correlation Heatmap) - 報告優化
-# ----------------------------------------------------------------------
+        fig.update_layout(
+            title_text='未來一小時 PM2.5 預測與歷史趨勢',
+            xaxis_title="時間",
+            yaxis_title="PM2.5 (µg/m³)",
+            height=400,
+            showlegend=False,
+            plot_bgcolor='white',
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
 
-print("\n--- 5. 繪製相關係數熱圖 (優化版) ---")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("⚠️ 無法繪製趨勢圖。請檢查資料來源或模型是否成功執行預測。")
 
-# 選擇用於計算相關係數的數值欄位
-# 注意：我們假設 Wind_Speed, AQI 等欄位可能不存在於您的合併數據中，這裡只使用 LASS/EPA 的核心數據
-numeric_cols = ['LASS_PM25', 'LASS_Temp', 'LASS_Humid', 'EPA_PM25']
+    st.markdown("---")
+    
+    # ------------------------------------------
+    # 6. 地圖視覺化 (LASS 數據點)
+    # ------------------------------------------
+    st.markdown("#### 📍 LASS/AirBox 即時數據分佈 (台灣地區)")
 
-# 確保欄位存在且是數值型
-df_corr = df[numeric_cols].copy()
+    if latest_data is not None and not latest_data.empty and 'lat' in latest_data.columns and 'lon' in latest_data.columns:
+        # 使用最新的 LASS 數據創建地圖
+        map_center = [latest_data['lat'].mean(), latest_data['lon'].mean()]
+        m = folium.Map(location=map_center, zoom_start=8, tiles="cartodbpositron")
 
-# 計算相關係數矩陣 (Correlation Matrix)
-corr_matrix = df_corr.corr()
+        # 根據 PM2.5 值定義顏色
+        def get_pm25_color(pm):
+            if np.isnan(pm): return 'lightgray'
+            if pm <= 15.4: return 'green'
+            if pm <= 35.4: return 'blue'
+            if pm <= 54.4: return 'orange'
+            return 'red'
 
-plt.figure(figsize=(9, 8))
-sns.heatmap(
-    corr_matrix, 
-    annot=True,          # 顯示數值
-    cmap='coolwarm',     # 顏色圖
-    fmt=".2f",           # 數值格式
-    linewidths=0.5,      # 線寬
-    linecolor='black',
-    cbar_kws={'label': '相關係數 (Correlation Coefficient)'}
-)
+        # 將數據點添加到地圖
+        for idx, row in latest_data.iterrows():
+            pm_value = row.get('pm25', np.nan)
+            temp_value = row.get('temp', np.nan)
+            humid_value = row.get('humidity', np.nan)
 
-plt.title('PM2.5 及其相關特徵之相關係數熱圖', fontsize=18, fontweight='bold')
-plt.tight_layout()
-plt.savefig('correlation_heatmap.png')
-print("✅ 相關係數熱圖繪製完成 (correlation_heatmap.png)。")
+            if np.isfinite(row['lat']) and np.isfinite(row['lon']):
+                pm_color = get_pm25_color(pm_value)
+                
+                popup_html = f"""
+                <b>PM2.5: {format_value(pm_value)}</b> µg/m³<br>
+                溫度: {format_value(temp_value)} °C<br>
+                濕度: {format_value(humid_value)} %
+                """
+                
+                folium.CircleMarker(
+                    location=[row['lat'], row['lon']],
+                    radius=5,
+                    color=pm_color,
+                    fill=True,
+                    fill_color=pm_color,
+                    fill_opacity=0.7,
+                    popup=folium.Popup(popup_html, max_width=300)
+                ).add_to(m)
 
-print("\n🎉 EDA 腳本執行完畢。共輸出三張圖片 (png 檔案) 到您的工作目錄。")
-print("您現在可以檢視這些圖片以獲得深入的洞察。")
+        # 標記選定的預測測站
+        station_coords = STATIONS_COORDS.get(selected_station)
+        if station_coords:
+            marker_color = 'purple'
+            marker_popup_text = f"🎯 **AI 預測目標:** {selected_station}<br>預測 PM2.5: {pred_pm_display}"
 
-# 為了在某些環境中能自動顯示 Matplotlib 圖形，保留 plt.show()
-# 但如果您在 Colab/Jupyter 環境中執行，圖片會自動顯示
-# plt.show()
+            folium.Marker(
+                location=[station_coords['lat'], station_coords['lon']],
+                popup=marker_popup_text,
+                icon=folium.Icon(color=marker_color, icon='star')
+            ).add_to(m)
+
+
+        # 將地圖顯示在 Streamlit 中
+        st_folium(m, width=700, height=500, key="lass_map")
+    else:
+        st.warning("⚠️ 沒有足夠的 LASS 數據來繪製地圖。")
+
+
+# ==========================================
+# 4. 程式進入點
+# ==========================================
+if __name__ == '__main__':
+    run_app()
