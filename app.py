@@ -31,7 +31,7 @@ def get_region_from_coords(lat, lon):
 
 
 # ==========================================
-# 🛠️ 1. 爬蟲函數 (Data Fetcher) - [新增 device_id 和 sitename 欄位]
+# 🛠️ 1. 爬蟲函數 (Data Fetcher) - [只保留完整數據點]
 # ==========================================
 
 @st.cache_data(ttl=300) # 每 5 分鐘更新一次資料
@@ -53,10 +53,10 @@ def fetch_latest_lass_data():
         df = pd.DataFrame(records)
         
         rename_dict = {
-            'device_id': 'device_id',  # <-- 關鍵：保留 device_id
+            'device_id': 'device_id',  
             's_d0': 'pm25',
-            's_t0': 'temp', 
-            's_h0': 'humidity', 
+            's_t0': 'temp',  # 溫度
+            's_h0': 'humidity', # 濕度
             'gps_lat': 'lat',
             'gps_lon': 'lon',
             'timestamp': 'time'
@@ -70,6 +70,7 @@ def fetch_latest_lass_data():
         required_cols = ['pm25', 'lat', 'lon', 'temp', 'humidity']
         for col in required_cols:
             if col not in df_clean.columns:
+                # 如果缺少溫濕度欄位，這裡會創建它並填入 NaN
                 df_clean[col] = np.nan
             else:
                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
@@ -84,17 +85,30 @@ def fetch_latest_lass_data():
             (df_clean['pm25'].between(0, 1000))
         ].dropna(subset=['lat', 'lon', 'device_id']).reset_index(drop=True)
 
+        # --- ⚠️ 關鍵修正: 只保留能用於 AI 預測的完整紀錄 ---
+        # AI 預測需要 PM2.5, 溫度 (temp) 和濕度 (humidity)
+        initial_count = len(df_clean)
+        df_clean = df_clean.dropna(subset=['pm25', 'temp', 'humidity']).reset_index(drop=True)
+        
+        if len(df_clean) < initial_count:
+            st.info(f"🧹 已自動過濾 {initial_count - len(df_clean):,} 筆因缺少溫度或濕度而無法進行 AI 預測的站點。")
+
+
         # --- 關鍵：生成 sitename 欄位 ---
         df_clean['region'] = df_clean.apply(
             lambda row: get_region_from_coords(row['lat'], row['lon']), axis=1
         )
-        # sitename 格式：[縣市/地區] - 裝置ID尾碼:[XXXX]
+        # sitename 格式：[縣市/地區] - ID尾碼:[XXXX]
         df_clean['sitename'] = df_clean.apply(
             lambda row: f"{row['region']} - ID尾碼:{str(row['device_id'])[:4]}", axis=1
         )
+        
+        if df_clean.empty:
+             st.warning("⚠️ 清理後已無任何具備完整特徵 (PM2.5/溫/濕) 的站點可供預測。")
+             return None
 
 
-        st.success(f"✅ LASS 資料爬取與清理成功！取得 {len(df_clean):,} 筆有效站點數據。")
+        st.success(f"✅ LASS 資料爬取與清理成功！取得 {len(df_clean):,} 筆**可供 AI 預測**的站點數據。")
         return df_clean
 
     except requests.exceptions.RequestException as e:
@@ -105,36 +119,31 @@ def fetch_latest_lass_data():
         return None
 
 # ==========================================
-# ⚙️ 2. 資料處理與模型預測 - [修改為單一站點數據]
+# ⚙️ 2. 資料處理與模型預測 
 # ==========================================
 
 def create_features(df_latest, selected_sitename, current_time):
     """
     對單一 LASS 裝置的數據進行特徵工程。
+    (注意: 由於數據已在 fetch_latest_lass_data 中被過濾，此處不再需要檢查 NaN)
     """
     
     # 1. 過濾出選定的裝置數據 (應該只有一行)
     df_device = df_latest[df_latest['sitename'] == selected_sitename]
     
     if df_device.empty:
-        st.warning(f"⚠️ 找不到站點 '{selected_sitename}' 的即時數據。")
+        # 理論上在數據預處理階段已排除此情況
         return None
 
     # 2. 提取關鍵單一數值
-    # 使用 .iloc[0] 確保只取第一行（如果有多個同名 sitename，取最新的/第一個）
     device_data = df_device.iloc[0] 
     
-    avg_pm25 = device_data.get('pm25', np.nan)
-    avg_temp = device_data.get('temp', np.nan)
-    avg_humid = device_data.get('humidity', np.nan)
+    avg_pm25 = device_data['pm25']
+    avg_temp = device_data['temp']
+    avg_humid = device_data['humidity']
     
-    # 3. 穩定性檢查: 確保關鍵數值有效 (CRITICAL FIX)
-    if not all(np.isfinite([avg_pm25, avg_temp, avg_humid])):
-         st.warning("⚠️ 選定站點缺少 PM2.5, 溫度或濕度的有效數據。無法構造完整的預測特徵。")
-         return None
-
-    # 4. 獲取測站座標
-    coords = {'lat': device_data.get('lat', np.nan), 'lon': device_data.get('lon', np.nan)}
+    # 3. 獲取測站座標
+    coords = {'lat': device_data['lat'], 'lon': device_data['lon']}
     
     # 構造特徵 DataFrame
     features = {
@@ -142,7 +151,6 @@ def create_features(df_latest, selected_sitename, current_time):
         'temp_t0': avg_temp,         
         'humid_t0': avg_humid,       
         
-        # 使用裝置自身的經緯度作為地理特徵
         'Station_lat': coords['lat'],
         'Station_lon': coords['lon'],
         
@@ -170,9 +178,9 @@ def predict_pm25_plus_1h(model, df_latest, selected_sitename):
     """
     current_time = datetime.now() 
     
-    # 1. 獲取當前 PM2.5
+    # 1. 獲取當前 PM2.5 (用於顯示)
     df_device = df_latest[df_latest['sitename'] == selected_sitename]
-    current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
+    current_pm = df_device.iloc[0]['pm25'] if not df_device.empty else np.nan
 
     # 2. 構造模型特徵
     X_predict = create_features(df_latest, selected_sitename, current_time)
@@ -184,8 +192,7 @@ def predict_pm25_plus_1h(model, df_latest, selected_sitename):
     # 3. 進行預測
     try:
         prediction = model.predict(X_predict)[0]
-        # PM2.5 數值不能是負數
-        predicted_pm = max(0, prediction) 
+        predicted_pm = max(0, prediction) # PM2.5 數值不能是負數
     except Exception as e:
         st.error(f"❌ 模型預測階段失敗: {e}")
         return current_pm, np.nan 
@@ -207,12 +214,14 @@ def run_app():
     # ------------------------------------------
     st.sidebar.title("⚙️ 設定選單")
     
-    # 初始化站點選擇
     selected_sitename = None
-    
+    latest_data = None
+    model = None
+
     # 爬取資料
     with st.spinner(f"⏳ 正在爬取即時空氣品質資料 ({datetime.now().strftime('%H:%M:%S')})..."):
         time.sleep(1) 
+        # 載入資料時，已自動過濾掉不完整的站點
         latest_data = fetch_latest_lass_data()
 
     if latest_data is not None and not latest_data.empty:
@@ -220,56 +229,46 @@ def run_app():
         sitename_options = sorted(latest_data['sitename'].unique().tolist())
         
         selected_sitename = st.sidebar.selectbox(
-            "選擇預測站點 (LASS 裝置)",
+            "🎯 選擇可供預測的 LASS 站點",
             options=sitename_options,
             index=0 # 預設選擇第一個
         )
     else:
-        st.error("❌ 無法取得有效的 LASS/AirBox 資料。請稍後再試。")
+        # 如果沒有可供預測的站點，則顯示錯誤並退出後續邏輯
+        st.error("❌ 目前 LASS 資料中找不到任何具備完整特徵 (PM2.5/溫/濕) 的站點。請稍後再試。")
+        return # 提前結束執行
 
 
     # 側邊欄資訊
-    st.sidebar.markdown(f"**🎯 當前目標:** `{selected_sitename if selected_sitename else 'N/A'}`")
+    st.sidebar.markdown(f"**站點 ID:** `{selected_sitename if selected_sitename else 'N/A'}`")
     st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        """
-        **數據來源:** LASS/AirBox 感測器網路 (即時數據)  
-        **AI 模型:** LightGBM  
-        **預測目標:** 選定站點下一小時 (t+1) PM2.5
-        """
-    )
-    st.sidebar.markdown("---")
-    
-    # 初始化預測變數
-    current_pm = np.nan
-    pred_pm = np.nan
-    model = None
     
     # ------------------------------------------
     # 預測邏輯 (Prediction Logic)
     # ------------------------------------------
-    if selected_sitename:
-        # 載入模型
-        model_path = 'best_lgb_model.joblib'
-        if not os.path.exists(model_path):
-            st.warning(f"⚠️ 找不到模型檔案: {model_path}。請先執行訓練腳本。")
-            # 即使沒有模型，仍嘗試獲取當前 PM2.5
+    current_pm = np.nan
+    pred_pm = np.nan
+    
+    # 載入模型
+    model_path = 'best_lgb_model.joblib'
+    if not os.path.exists(model_path):
+        st.error(f"❌ 找不到模型檔案: `{model_path}`。請先執行訓練腳本並將模型儲存為此名稱。")
+        # 即使沒有模型，仍嘗試獲取當前 PM2.5
+        df_device = latest_data[latest_data['sitename'] == selected_sitename]
+        current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
+    else:
+        try:
+            model = joblib.load(model_path)
+            
+            # 執行預測 (只有在模型載入成功時才執行)
+            with st.spinner("🧠 正在使用 AI 模型進行預測..."):
+                time.sleep(1) # 模擬預測所需時間
+                current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_sitename)
+                
+        except Exception as e:
+            st.error(f"❌ 模型載入或預測失敗: {e}。請檢查檔案格式或模型是否與特徵匹配。")
             df_device = latest_data[latest_data['sitename'] == selected_sitename]
             current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
-        else:
-            try:
-                model = joblib.load(model_path)
-            except Exception as e:
-                st.warning(f"⚠️ 模型載入失敗: {e}。請檢查檔案格式。")
-                df_device = latest_data[latest_data['sitename'] == selected_sitename]
-                current_pm = df_device.iloc[0].get('pm25', np.nan) if not df_device.empty else np.nan
-                
-            # 執行預測 (只有在模型載入成功時才執行)
-            if model:
-                with st.spinner("🧠 正在使用 AI 模型進行預測..."):
-                    time.sleep(1) # 模擬預測所需時間
-                    # 預測函數會自動處理數據缺失問題，並返回 np.nan
-                    current_pm, pred_pm = predict_pm25_plus_1h(model, latest_data, selected_sitename)
     
     
     # --- 格式化顯示數值 ---
@@ -305,7 +304,8 @@ def run_app():
         if not np.isnan(pred_pm) and not np.isnan(current_pm):
             delta_value = pred_pm - current_pm
             delta_display = f"{delta_value:.1f}"
-            delta_color = "inverse" # 綠色(up)代表惡化 (PM2.5上升)，紅色(down)代表改善 (PM2.5下降)
+            # 綠色(down)代表改善 (PM2.5下降)，紅色(up)代表惡化 (PM2.5上升)
+            delta_color = "inverse" 
 
         st.metric(
             label="PM2.5 預測值 (µg/m³)",
@@ -380,7 +380,8 @@ def run_app():
         times = ["-3H", "-2H", "-1H", "現在", "+1H (AI 預測)"]
         
         # 模擬過去數據波動 (基於當前值產生合理的歷史數據)
-        history = [current_pm + np.random.uniform(-5, 5) for _ in range(3)] 
+        # 為了穩定顯示，波動範圍設小一點
+        history = [current_pm + np.random.uniform(-3, 3) for _ in range(3)] 
         history = [max(0, x) for x in history]
 
         values = history + [current_pm, pred_pm]
@@ -410,7 +411,7 @@ def run_app():
             name='PM2.5 趨勢'
         ))
 
-        # 增加 PM2.5 等級水平線 (如果預測值有效)
+        # 增加 PM2.5 等級水平線
         fig.add_hline(y=15.5, line_dash="dash", line_color="green", annotation_text="優良/普通界線 (15.5)")
         fig.add_hline(y=35.5, line_dash="dash", line_color="blue", annotation_text="普通/敏感族群界線 (35.5)")
         fig.add_hline(y=54.5, line_dash="dash", line_color="orange", annotation_text="敏感族群/不健康界線 (54.5)")
@@ -428,7 +429,7 @@ def run_app():
 
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("⚠️ 無法繪製趨勢圖。請選擇站點或檢查資料來源。")
+        st.warning("⚠️ 無法繪製趨勢圖。請檢查模型是否載入或站點數據是否完整。")
 
     st.markdown("---")
     
