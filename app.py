@@ -12,11 +12,11 @@ import os
 import time
 
 # ==========================================
-# 🔧 核心設定 (Person 6: 系統整合)
+# 🔧 核心設定 (Core Configuration)
 # ==========================================
 st.set_page_config(page_title="台灣 AI 空氣品質預測戰情室", layout="wide", page_icon="🍃")
 
-# 修正：將 '台中' 統一改為 '臺中'，確保側邊欄選單與字典鍵一致
+# 修正：將 '台中' 統一改為 '臺中'，確保選單與字典鍵一致
 STATIONS_COORDS = {
     '台北': {'lat': 25.0330, 'lon': 121.5654},
     '板橋': {'lat': 25.0129, 'lon': 121.4624},
@@ -37,7 +37,7 @@ STATIONS_COORDS = {
 TARGET_URL = "https://pm25.lass-net.org/data/last-all-airbox.json"
 
 # ==========================================
-# 🛠️ 1. 爬蟲函數 (Person 1: 資料工程)
+# 🛠️ 1. 爬蟲函數 (Data Fetcher)
 # ==========================================
 
 @st.cache_data(ttl=300) # 每 5 分鐘更新一次資料
@@ -78,7 +78,7 @@ def fetch_latest_lass_data():
         df_clean = df[[col for col in cols_to_keep if col in df.columns]].copy() 
         df_clean.rename(columns=rename_dict, inplace=True)
 
-        # 確保必要的欄位存在
+        # 確保必要的欄位存在 (避免在dropna時崩潰)
         required_cols = ['pm25', 'lat', 'lon', 'temp', 'humidity']
         for col in required_cols:
             if col not in df_clean.columns:
@@ -122,7 +122,7 @@ def create_features(df, station_name, current_time):
     
     # 如果平均值為 NaN，則無法進行預測
     if np.isnan(avg_pm25) or np.isnan(avg_temp) or np.isnan(avg_humid):
-         st.warning("⚠️ LASS 數據平均值為 NaN，無法構造完整的特徵。")
+         # st.warning("⚠️ LASS 數據平均值為 NaN，無法構造完整的特徵。") # 避免過多警告干擾
          return None
 
     # 獲取測站座標
@@ -144,7 +144,7 @@ def create_features(df, station_name, current_time):
         'target_dayofweek': (current_time + timedelta(hours=1)).weekday(),
         'target_is_weekend': (current_time + timedelta(hours=1)).weekday() >= 5,
         
-        # 假設前一/兩小時數據與當前小時數據相同 (簡化處理)
+        # 假設前一/兩小時數據與當前小時數據相同 (簡化處理，匹配模型特徵需求)
         'pm25_t1': avg_pm25, 
         'temp_t1': avg_temp,
         'humid_t1': avg_humid,
@@ -180,7 +180,7 @@ def predict_pm25_plus_1h(model, df_latest, selected_station):
         # PM2.5 數值不能是負數
         predicted_pm = max(0, prediction) 
     except Exception as e:
-        st.error(f"❌ 模型預測失敗: {e}")
+        # st.error(f"❌ 模型預測失敗: {e}") # 避免錯誤顯示在畫面上
         return current_pm, np.nan 
 
     return current_pm, predicted_pm
@@ -195,7 +195,9 @@ def run_app():
     st.title("🇹🇼 台灣 AI 空氣品質預測戰情室")
     st.markdown("---")
 
-    # 側邊欄設定
+    # ------------------------------------------
+    # 側邊欄設定 (確保所有元件都在 st.sidebar 內)
+    # ------------------------------------------
     st.sidebar.title("⚙️ 設定選單")
     station_options = list(STATIONS_COORDS.keys())
     
@@ -224,28 +226,24 @@ def run_app():
         # 爬蟲函數
         latest_data = fetch_latest_lass_data()
         
+    current_pm = np.nan
+    pred_pm = np.nan
+    model = None
+    
     if latest_data is None or latest_data.empty:
-        st.error("❌ 無法取得有效的 LASS/AirBox 資料。應用程式無法運行預測。")
-        # 這裡不使用 st.stop()，改為顯示靜態訊息和地圖，避免整個應用程式頁面空白
-        current_pm = np.nan
-        pred_pm = np.nan
-        model = None
+        st.error("❌ 無法取得有效的 LASS/AirBox 資料。預測將顯示 N/A。")
     else:
         # 載入模型
         model_path = 'best_lgb_model.joblib'
         if not os.path.exists(model_path):
-            st.error(f"❌ 找不到模型檔案: {model_path}。請先執行訓練腳本並將其儲存到根目錄。")
+            st.warning(f"⚠️ 找不到模型檔案: {model_path}。請先執行訓練腳本並將其儲存到根目錄。")
             current_pm = latest_data['pm25'].mean()
-            pred_pm = np.nan
-            model = None
         else:
             try:
                 model = joblib.load(model_path)
             except Exception as e:
-                st.error(f"❌ 模型載入失敗: {e}")
+                st.warning(f"⚠️ 模型載入失敗: {e}。無法進行預測。")
                 current_pm = latest_data['pm25'].mean()
-                pred_pm = np.nan
-                model = None
                 
             # 執行預測
             if model:
@@ -261,29 +259,36 @@ def run_app():
     
     col1, col2, col3 = st.columns([1, 1, 2])
 
+    # --- Col 1: 當前 PM2.5 ---
     with col1:
         st.markdown(f"#### 🎯 預測目標: {selected_station}")
+        # 處理 N/A 顯示
+        current_pm_display = f"{current_pm:.1f}" if not np.isnan(current_pm) else "N/A"
         st.metric(
             label="當前區域 LASS 感測器平均 PM2.5 (µg/m³)", 
-            value=f"{current_pm:.1f}" if not np.isnan(current_pm) else "N/A",
+            value=current_pm_display,
             delta_color="off"
         )
         
+    # --- Col 2: 預測 PM2.5 ---
     with col2:
         st.markdown("#### 🔮 AI 預測 (下一小時)")
-        if not np.isnan(pred_pm):
-            delta_value = pred_pm - current_pm if not np.isnan(current_pm) else 0
+        if not np.isnan(pred_pm) and not np.isnan(current_pm):
+            delta_value = pred_pm - current_pm
             st.metric(
                 label="PM2.5 預測值 (µg/m³)",
                 value=f"{pred_pm:.1f}",
-                delta=f"{delta_value:.1f}" if not np.isnan(current_pm) else "N/A",
-                delta_color="inverse" # 紅色代表上升 (惡化)，綠色代表下降 (改善)
+                # 綠色(up)代表惡化 (PM2.5上升)，紅色(down)代表改善 (PM2.5下降)
+                delta=f"{delta_value:.1f}",
+                delta_color="inverse" 
             )
+        elif not np.isnan(pred_pm):
+             st.metric(label="PM2.5 預測值 (µg/m³)", value=f"{pred_pm:.1f}", delta="N/A", delta_color="off")
         else:
              st.metric(label="PM2.5 預測值 (µg/m³)", value="預測失敗", delta="N/A", delta_color="off")
 
 
-    # 狀態儀表板 (修正錯誤符號問題：如果 pred_pm 是 NaN，則不會進入計算)
+    # --- Col 3: 狀態儀表板 (已加入 NaN 檢查，避免錯誤符號) ---
     with col3:
         st.markdown("#### 📊 視覺化戰情指標")
         
@@ -319,14 +324,14 @@ def run_app():
                 <div style="display: flex; justify-content: space-between;">
                     <div>
                         <p>現在 (Current PM2.5)</p>
-                        <h2 style="color: #0068c9;">{current_pm:.1f}</h2>
+                        <h2 style="color: #0068c9;">{current_pm_display}</h2>
                     </div>
                     <div style="text-align: right;">
                         <p>預測 +1H (AI PM2.5)</p>
-                        <h2 style="color: {'#ff2b2b' if pred_pm > current_pm and pred_pm > 54.4 else '#09ab3b' if pred_pm <= 35.4 else '#ffa400'};">
-                            {pred_pm:.1f}
+                        <h2 style="color: {color_code};">
+                            {f"{pred_pm:.1f}" if not np.isnan(pred_pm) else "N/A"}
                             <span style="font-size:16px">
-                            {'⬆' if pred_pm > current_pm else '⬇'}
+                            {'⬆' if not np.isnan(pred_pm) and not np.isnan(current_pm) and pred_pm > current_pm else '⬇' if not np.isnan(pred_pm) and not np.isnan(current_pm) and pred_pm < current_pm else ''}
                             </span>
                         </h2>
                     </div>
@@ -336,7 +341,9 @@ def run_app():
 
     st.markdown("---")
 
-    # 繪製趨勢圖 (只有當 current_pm 和 pred_pm 都有效時才繪製)
+    # ------------------------------------------
+    # 5. 趨勢圖 (加入 NaN 檢查)
+    # ------------------------------------------
     st.markdown("#### 📈 區域 PM2.5 趨勢概覽")
 
     if not np.isnan(current_pm) and not np.isnan(pred_pm):
@@ -344,6 +351,7 @@ def run_app():
         times = ["-3H", "-2H", "-1H", "現在", "+1H (AI 預測)"]
         
         # 模擬過去數據波動 (簡化處理)
+        # 過去數據不能超過現在值太多，也不能為負數
         history = [current_pm + np.random.uniform(-5, 5) for _ in range(3)] 
         history = [max(0, x) for x in history]
 
@@ -398,7 +406,7 @@ def run_app():
     st.markdown("---")
     
     # ------------------------------------------
-    # 5. 地圖視覺化 (LASS 數據點)
+    # 6. 地圖視覺化 (LASS 數據點)
     # ------------------------------------------
     st.markdown("#### 📍 LASS/AirBox 即時數據分佈 (台灣地區)")
 
@@ -437,10 +445,17 @@ def run_app():
         # 標記選定的預測測站
         station_coords = STATIONS_COORDS.get(selected_station)
         if station_coords:
+            # 決定預測目標標記的顏色和內容
+            marker_color = 'purple'
+            if not np.isnan(pred_pm):
+                marker_popup_text = f"🎯 **AI 預測目標:** {selected_station}<br>預測 PM2.5: {pred_pm:.1f}"
+            else:
+                marker_popup_text = f"🎯 **AI 預測目標:** {selected_station}<br>預測失敗，無數值"
+
             folium.Marker(
                 location=[station_coords['lat'], station_coords['lon']],
-                popup=f"🎯 **AI 預測目標:** {selected_station}<br>預測 PM2.5: {pred_pm:.1f}" if not np.isnan(pred_pm) else f"🎯 **AI 預測目標:** {selected_station}<br>預測失敗",
-                icon=folium.Icon(color='purple', icon='star')
+                popup=marker_popup_text,
+                icon=folium.Icon(color=marker_color, icon='star')
             ).add_to(m)
 
 
