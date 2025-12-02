@@ -1,3 +1,13 @@
-joblib 
-scikit-learn/lightgbm 
+streamlit
+pandas
+numpy
 requests
+plotly
+folium
+streamlit-folium
+joblib
+scikit-learn
+lightgbm
+xgboost
+matplotlib
+seaborn
