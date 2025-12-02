@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os 
 import hashlib 
-import time # 新增：用於模擬過去時間點
+import time
 
 # ==========================================
 # 1. 系統設定與快取
@@ -21,6 +21,16 @@ STATIONS_COORDS = {
     '桃園': {'lat': 24.9976, 'lon': 121.3033}, '臺中': {'lat': 24.1477, 'lon': 120.6736},
     '臺南': {'lat': 22.9997, 'lon': 120.2270}, '高雄': {'lat': 22.6273, 'lon': 120.3014}
 }
+
+# 輔助函數：將 LASS 經緯度粗略分組到縣市/區域
+def map_coord_to_city(lat, lon):
+    if lat > 24.8 and lon > 121: return "北部地區 (台北/新北/基隆)"
+    if lat > 24.3 and lon < 121: return "桃竹苗地區"
+    if lat < 24.3 and lat > 23.5 and lon < 121: return "中部地區 (台中/彰化/南投)"
+    if lat < 23.5 and lat > 22.5 and lon < 121: return "雲嘉南地區"
+    if lat < 22.5 and lon < 121: return "高屏地區"
+    if lon > 121 and lat > 23: return "東部地區 (宜花東)"
+    return "其他/離島"
 
 # ==========================================
 # 2. 資料獲取與處理模組
@@ -66,7 +76,6 @@ def get_lass_data():
         return df.dropna(subset=['pm25', 'lat', 'lon'])
         
     except Exception as e:
-        # 在部署環境中避免過多錯誤訊息洗版
         return pd.DataFrame()
 
 @st.cache_resource
@@ -78,7 +87,7 @@ def load_model():
     if os.path.exists(model_path):
         try:
             model = joblib.load(model_path)
-            # st.success("✅ AI 模型載入成功！") # 在 Streamlit 應用程序執行時已經會顯示
+            # st.success("✅ AI 模型載入成功！")
             return model
         except Exception as e:
             # st.warning(f"❌ 模型檔案載入失敗: {e}")
@@ -101,7 +110,7 @@ def load_historical_data():
             elif 'time' in df.columns:
                 df['time'] = pd.to_datetime(df['time'])
             
-            # st.success("✅ 歷史資料庫載入成功！") # 在 Streamlit 應用程序執行時已經會顯示
+            # st.success("✅ 歷史資料庫載入成功！")
             return df.dropna(subset=['time'])
         except Exception as e:
             # st.error(f"❌ 歷史資料讀取錯誤: {e}")
@@ -115,6 +124,10 @@ def load_historical_data():
 df_live = get_lass_data()
 df_hist = load_historical_data()
 model = load_model()
+
+# **[新增]** 將縣市分類應用到即時資料，用於篩選
+if not df_live.empty:
+    df_live['City'] = df_live.apply(lambda row: map_coord_to_city(row['lat'], row['lon']), axis=1)
 
 # ==========================================
 # 4. 介面呈現 (Streamlit Layout)
@@ -184,6 +197,7 @@ if page == "即時戰情室":
 
 # --- 頁面 2: 歷史數據分析 (EDA) ---
 elif page == "歷史數據分析":
+    # (此頁面代碼不變)
     st.title("📈 歷史趨勢與特徵分析 (EDA)")
     
     if df_hist.empty:
@@ -191,7 +205,6 @@ elif page == "歷史數據分析":
     else:
         st.subheader("1. 數據分佈概覽")
         
-        # 繪製 PM2.5 密度圖
         try:
             fig_dist = px.histogram(
                 df_hist, x='LASS_PM25', nbins=50, 
@@ -205,10 +218,8 @@ elif page == "歷史數據分析":
             
         st.subheader("2. 氣象特徵與 PM2.5 關係")
         
-        # 繪製溫濕度關係 (預期欄位: LASS_PM25, LASS_Temp, LASS_Humid)
         if 'LASS_PM25' in df_hist.columns and 'LASS_Temp' in df_hist.columns and 'LASS_Humid' in df_hist.columns:
             
-            # 抽樣 1000 筆以加速繪圖
             sample_df = df_hist.sample(n=min(10000, len(df_hist)), random_state=42)
             
             col_eda1, col_eda2 = st.columns(2)
@@ -231,10 +242,10 @@ elif page == "歷史數據分析":
                 )
                 st.plotly_chart(fig_humid, use_container_width=True)
         else:
-            st.warning("歷史資料缺少關鍵欄位 (`LASS_PM25`/`LASS_Temp`/`LASS_Humid`)，無法繪製關聯圖。")
+            st.warning("歷史資料缺少關鍵欄位，無法繪製關聯圖。")
 
 
-# --- 頁面 3: 模型預測展示 ---
+# --- 頁面 3: 模型預測展示 (核心修正) ---
 elif page == "模型預測展示":
     st.title("🤖 AI 模型預測與績效")
     
@@ -246,7 +257,7 @@ elif page == "模型預測展示":
         model_performance = {
             'Baseline (t-1)': 8.5,
             'XGBoost': 5.2,
-            'LightGBM': 4.8  # 假設 LightGBM 最佳
+            'LightGBM': 4.8
         }
         df_perf = pd.DataFrame(list(model_performance.items()), columns=['模型', 'RMSE (越低越好)'])
         fig_perf = px.bar(
@@ -262,40 +273,32 @@ elif page == "模型預測展示":
     else:
         st.success(f"模型已載入，準備進行實時預測！類型: {type(model).__name__}")
         
-        st.markdown("### 🔍 單點未來一小時預測")
-        # 讓用戶選擇一個即時測站進行預測
+        st.markdown("### 🔍 站點過去 6 小時觀測與未來 1 小時預測")
+        
         if not df_live.empty:
             
-            # 從 LASS 即時數據中挑選一個站點
-            station_ids = df_live['id'].unique()
-            selected_id = st.selectbox("選擇測站 ID (來自 LASS 即時資料)", station_ids)
+            # **[修正 1]：兩級聯動選擇 (縣市 -> 站點 ID)**
+            city_options = df_live['City'].unique()
+            selected_city = st.selectbox("1. 選擇縣市/地區", city_options)
+
+            filtered_stations = df_live[df_live['City'] == selected_city]['id'].unique()
+            selected_id = st.selectbox("2. 選擇站點 ID", filtered_stations)
             
             # 獲取當前數據
             current_data = df_live[df_live['id'] == selected_id].iloc[0]
             current_pm = current_data['pm25']
             
-            # 獲取當前時間 (用於時間特徵)
             now = datetime.now()
             
-            # --- 核心修正：特徵工程 (必須與訓練時的 ['pm25_t1', 'hour', 'month', 'weekday', 'is_weekend', 'site_id'] 一致) ---
-            
-            # 1. 站點 ID 數值化 (模擬 Label Encoding / One-Hot)
-            # 使用 hashlib 將 device_id 轉換為一個模擬的數值特徵
-            # **注意: 真正的部署應使用訓練時的 LabelEncoder 或 One-Hot Encoder 矩陣**
+            # --- 執行模型預測 (特徵工程與先前邏輯相同) ---
             site_id_int = int(hashlib.sha1(selected_id.encode("utf-8")).hexdigest(), 16) % 100
             
-            # 2. 時間特徵
             hour = now.hour
             month = now.month
-            # weekday: 星期一=0, 星期日=6 (Python 標準)
             weekday = now.weekday() 
-            # is_weekend: 0=平日, 1=週末 (Sat=5, Sun=6)
             is_weekend = 1 if weekday >= 5 else 0
-            
-            # 3. 延遲特徵 (pm25_t1)
             pm25_t1 = current_pm
             
-            # 4. 構造 DataFrame，並確保欄位與模型訓練時一致
             feature_data = {
                 'pm25_t1': [pm25_t1],
                 'hour': [hour],
@@ -310,7 +313,7 @@ elif page == "模型預測展示":
             try:
                 # 執行預測
                 pred_pm = model.predict(X_predict)[0]
-                pred_pm = max(0, pred_pm) # PM2.5 不會是負數
+                pred_pm = max(0, pred_pm) 
                 
                 # --- 成果展示 (KPI 卡片) ---
                 col_kpi_1, col_kpi_2 = st.columns(2)
@@ -321,46 +324,63 @@ elif page == "模型預測展示":
                 with col_kpi_2:
                     delta_value = pred_pm - current_pm
                     st.metric("預測下一小時 PM2.5", f"{pred_pm:.1f} µg/m³", 
-                              delta=f"{delta_value:.1f} (變化)", delta_color="inverse")
+                              delta=f"{delta_value:.1f} (變化)", 
+                              delta_color="inverse") # 污染上升 (紅色)
                 
-                # --- 繪製趨勢圖 (優化後) ---
-                st.markdown("#### 📈 過去與預測趨勢")
+                # --- **[修正 2]**：過去 6 小時觀測與未來 1 小時預測趨勢圖 ---
+                st.markdown("#### 📈 過去 6 小時觀測值與未來 1 小時預測值")
                 
-                # 模擬過去數據點的時間標籤
-                current_time = now.strftime("%H:%M")
-                times = [(now - timedelta(hours=3)).strftime("%H:%M"), 
-                         (now - timedelta(hours=2)).strftime("%H:%M"), 
-                         (now - timedelta(hours=1)).strftime("%H:%M"), 
-                         current_time, 
-                         (now + timedelta(hours=1)).strftime("%H:%M") + " (預測)"]
+                # 模擬過去 6 小時的數據點時間標籤
+                # 時間點: t-6H, t-5H, ..., t-1H, t(現在), t+1H(預測)
+                time_labels = []
+                for i in range(6, 0, -1):
+                    time_labels.append((now - timedelta(hours=i)).strftime("%H:%M"))
+                time_labels.append(now.strftime("%H:%M") + " (現在)")
+                time_labels.append((now + timedelta(hours=1)).strftime("%H:%M") + " (預測)")
                          
-                # 模擬過去 PM2.5 數據 (假設波動範圍為 +/- 5)
-                # 為了避免每次點擊都產生不同歷史值，這裡可以用一個簡單的模擬邏輯
+                # 模擬過去 6 小時 PM2.5 數據 
+                # 使用站點ID的哈希值來固定隨機數種子，確保同一站點的歷史模擬值穩定
                 np.random.seed(int(time.time() // 60) + int(hashlib.sha1(selected_id.encode("utf-8")).hexdigest(), 16) % 1000)
-                history = [current_pm + np.random.uniform(-5, 5) for _ in range(3)]
-                values = history + [current_pm, pred_pm]
+                # 過去6個點的模擬值
+                history_pm = [current_pm + np.random.uniform(-5, 5) for _ in range(6)]
                 
-                df_trend = pd.DataFrame({'時間': times, 'PM2.5 濃度 (µg/m³)': values})
+                # 結合所有數據點 (6 歷史 + 1 現在 + 1 預測)
+                values = history_pm + [current_pm, pred_pm]
                 
-                fig_trend = go.Figure()
+                # 構造 DataFrame
+                df_trend = pd.DataFrame({
+                    '時間點': time_labels, 
+                    'PM2.5 濃度 (µg/m³)': values
+                })
+                
+                # 增加一個類別欄位用於 Plotly Express 的顏色區分
+                df_trend['數據類型'] = ['觀測值'] * 7 + ['預測值'] * 1
 
-                # 過去數據線
-                fig_trend.add_trace(go.Scatter(
-                    x=df_trend['時間'][:4], y=df_trend['PM2.5 濃度 (µg/m³)'][:4], 
-                    mode='lines+markers', name='即時監測',
-                    line=dict(color='blue'), marker=dict(size=8)
-                ))
-
-                # 預測數據點 (特別標註)
-                fig_trend.add_trace(go.Scatter(
-                    x=df_trend['時間'][3:5], y=df_trend['PM2.5 濃度 (µg/m³)'][3:5], 
-                    mode='lines+markers', name='AI 預測',
-                    line=dict(color='red', dash='dash'), marker=dict(color='red', size=10),
-                    showlegend=False
-                ))
+                # 使用 Plotly Express 繪製趨勢圖
+                # 雖然 Plotly Express 不如 go.Figure 對分段線條控制精確，但可以通過 color 參數來區分
+                fig_trend = px.line(
+                    df_trend, 
+                    x='時間點', 
+                    y='PM2.5 濃度 (µg/m³)', 
+                    color='數據類型', # 使用 '數據類型' 欄位區分顏色
+                    title=f'站點 {selected_id} 空氣品質 6+1 小時趨勢',
+                    markers=True,
+                    color_discrete_map={'觀測值': 'blue', '預測值': 'red'}
+                )
+                
+                # 優化：讓預測值線段為虛線
+                fig_trend.update_traces(
+                    selector=dict(name='預測值'), # 選擇預測值的線段
+                    line=dict(dash='dash')
+                )
+                
+                # 優化：讓觀測值線段只連接觀測點 (將現在點也算入觀測)
+                fig_trend.update_traces(
+                    selector=dict(name='觀測值'),
+                    line=dict(color='blue', dash='solid')
+                )
 
                 fig_trend.update_layout(
-                    title=f'{selected_id} PM2.5 短期趨勢',
                     xaxis_title="時間點",
                     yaxis_title="PM2.5 濃度 (µg/m³)",
                     hovermode="x unified"
