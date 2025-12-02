@@ -6,7 +6,8 @@ import joblib
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os # <--- 偵錯所需函式庫
+import os 
+import hashlib # <--- 新增: 用於將 site_id 轉換為數值
 
 # ==========================================
 # 1. 系統設定與快取
@@ -272,31 +273,46 @@ elif page == "模型預測展示":
             station_ids = df_live['id'].unique()
             selected_id = st.selectbox("選擇測站 ID (來自 LASS 即時資料)", station_ids)
             
+            # 獲取當前數據
             current_data = df_live[df_live['id'] == selected_id].iloc[0]
             current_pm = current_data['pm25']
-
-            # --- 模擬特徵工程 ---
-            # 因為沒有完整的歷史資料，這裡的特徵工程只是模擬
-            # 實際應用中，需要提取時間特徵 (hour, dayofweek) 和前幾小時的 lag features
             
-            # 建立一個模擬的 LightGBM 輸入特徵 (X)
-            # 假設模型需要這些特徵 (根據你的訓練腳本)
+            now = datetime.now()
+            
+            # --- 修正後的特徵工程 (必須與訓練時的 ['pm25_t1', 'hour', 'month', 'weekday', 'is_weekend', 'site_id'] 一致) ---
+            
+            # 1. 站點 ID 數值化 (模擬 Label Encoding / One-Hot)
+            # 由於我們沒有原始的 LabelEncoder，我們使用 hashlib 將 device_id 轉換為一個模擬的數值
+            # 這裡使用一個簡單的哈希值，並對 100 取模來模擬一個分類特徵
+            # **注意: 真正的部署應使用訓練時的 LabelEncoder**
+            site_id_int = int(hashlib.sha1(selected_id.encode("utf-8")).hexdigest(), 16) % 100
+            
+            # 2. 時間特徵
+            hour = now.hour
+            month = now.month
+            # weekday: 星期一=0, 星期日=6 (Pandas/Python 標準)
+            weekday = now.weekday() 
+            # is_weekend: 0=平日, 1=週末 (Sat=5, Sun=6)
+            is_weekend = 1 if weekday >= 5 else 0
+            
+            # 3. 延遲特徵 (pm25_t1)
+            pm25_t1 = current_pm
+            
+            # 4. 構造 DataFrame
             feature_data = {
-                'pm25_t1': [current_data['pm25']],
-                'temp_t1': [current_data.get('temp', 25)], # 用預設值避免錯誤
-                'humid_t1': [current_data.get('humidity', 70)],
-                # 時間特徵 (必須要跟訓練時一致)
-                'hour': [datetime.now().hour],
-                'dayofweek': [datetime.now().weekday()],
-                # 假設需要經緯度
-                'lat': [current_data['lat']],
-                'lon': [current_data['lon']],
+                'pm25_t1': [pm25_t1],
+                'hour': [hour],
+                'month': [month],
+                'weekday': [weekday],
+                'is_weekend': [is_weekend],
+                'site_id': [site_id_int] # 模擬 Label Encoding/數值分類特徵
             }
 
-            # 確保特徵名稱與訓練時一致 (這裡無法確保，所以要手動調整)
-            # **警告:** 如果模型需要其他特徵，這裡會預測失敗
-            
+            # 確保欄位順序與訓練時一致 (XGBoost/LightGBM 預設使用特徵名稱匹配，但保持順序是個好習慣)
             X_predict_mock = pd.DataFrame(feature_data)
+            
+            # 檢查模型是否需要特定的特徵順序 (對於 LightGBM/XGBoost，欄位名稱匹配更重要)
+            # 如果還是失敗，請嘗試手動設定欄位順序 (但目前應無需)
             
             try:
                 # 執行預測
