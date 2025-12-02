@@ -111,13 +111,27 @@ def load_historical_data():
             df = pd.read_csv(file_path, low_memory=False)
             
             # 兼容不同的時間欄位名稱
+            time_col = None
             if 'Timestamp_Aligned_Hour' in df.columns:
-                df['time'] = pd.to_datetime(df['Timestamp_Aligned_Hour'])
+                time_col = 'Timestamp_Aligned_Hour'
             elif 'time' in df.columns:
-                df['time'] = pd.to_datetime(df['time'])
-            
-            return df.dropna(subset=['time'])
+                time_col = 'time'
+                
+            if time_col:
+                df['time'] = pd.to_datetime(df[time_col])
+            else:
+                st.error("歷史資料中找不到時間欄位 (Timestamp_Aligned_Hour 或 time)。")
+                return pd.DataFrame()
+                
+            # 將數值欄位轉換為 float (避免資料型態問題)
+            numeric_cols = ['LASS_PM25', 'LASS_Temp', 'LASS_Humid', 'EPA_PM25', 'AQI', 'Wind_Speed']
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+            return df.dropna(subset=['time', 'LASS_PM25'])
         except Exception as e:
+            st.error(f"讀取歷史數據時發生錯誤: {e}")
             return pd.DataFrame()
     return pd.DataFrame()
 
@@ -204,56 +218,118 @@ if page == "即時戰情室":
         fig_map.update_layout(height=600, margin={"r":0,"t":0,"l":0,"b":0})
         st.plotly_chart(fig_map, use_container_width=True)
 
-# --- 頁面 2: 歷史數據分析 (無變動) ---
+# --- 頁面 2: 歷史數據分析 (已修正並新增進階 EDA 圖表) ---
 elif page == "歷史數據分析":
     st.title("📈 歷史趨勢與特徵分析 (EDA)")
     
     if df_hist.empty:
         st.info("💡 請將組員合併後的檔案 `all_pm25_7days.csv` 上傳至專案根目錄，才能進行歷史分析。")
     else:
-        st.subheader("1. 數據分佈概覽")
+        # 確保關鍵欄位存在
+        required_cols = ['LASS_PM25', 'LASS_Temp', 'LASS_Humid', 'MonitorName']
+        missing_cols = [col for col in required_cols if col not in df_hist.columns]
         
-        try:
-            fig_dist = px.histogram(
-                df_hist, x='LASS_PM25', nbins=50, 
-                title="LASS PM2.5 濃度分佈",
-                labels={'LASS_PM25': 'PM2.5 (μg/m³)'},
-                color_discrete_sequence=['#4ECDC4']
+        if missing_cols:
+            st.error(f"歷史資料缺少關鍵欄位：{', '.join(missing_cols)}，無法繪製進階 EDA 圖表。請檢查 `all_pm25_7days.csv`。")
+            return
+
+        # 1. PM2.5 時間趨勢圖 (參考圖一)
+        st.subheader("1. 主要測站 PM2.5 時間趨勢")
+        
+        # 計算每小時的 PM2.5 平均值，並依測站分組
+        # 選取觀測筆數最多的前 10 個站點進行繪製
+        top_stations = df_hist['MonitorName'].value_counts().nlargest(10).index
+        df_trend = df_hist[df_hist['MonitorName'].isin(top_stations)]
+        
+        # 聚合：計算每小時平均值
+        df_trend_agg = df_trend.groupby(['time', 'MonitorName'])['LASS_PM25'].mean().reset_index()
+
+        fig_trend = px.line(
+            df_trend_agg,
+            x='time',
+            y='LASS_PM25',
+            color='MonitorName',
+            title='近七日主要測站 LASS PM2.5 濃度變化趨勢 (小時平均)',
+            labels={'LASS_PM25': 'PM2.5 濃度 (μg/m³)', 'time': '日期與時間', 'MonitorName': '測站名稱'},
+            template="plotly_white",
+            line_shape='spline' # 讓線條更平滑
+        )
+        fig_trend.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+
+        # 2. 氣象特徵 vs PM2.5 散布圖 (參考圖二)
+        st.subheader("2. 氣象特徵與 PM2.5 關係散布圖")
+        
+        # 由於數據量可能很大，取樣 10,000 筆以提高效能
+        sample_df = df_hist.sample(n=min(10000, len(df_hist)), random_state=42)
+        
+        col_eda1, col_eda2 = st.columns(2)
+        
+        with col_eda1:
+            fig_temp = px.scatter(
+                sample_df, x='LASS_Temp', y='LASS_PM25', 
+                color='MonitorName', # 以測站名稱著色
+                opacity=0.6,
+                title="PM2.5 與溫度散布關係圖",
+                labels={'LASS_Temp': '溫度 (°C)', 'LASS_PM25': 'PM2.5 (μg/m³)'},
+                trendline="ols", # 加入趨勢線
+                color_continuous_scale=px.colors.sequential.Sunset,
+                template="plotly_white"
             )
-            st.plotly_chart(fig_dist, use_container_width=True)
-        except KeyError:
-            st.warning("歷史資料缺少 `LASS_PM25` 欄位，請檢查合併後的 CSV 檔案。")
+            fig_temp.update_traces(marker=dict(size=5))
+            st.plotly_chart(fig_temp, use_container_width=True)
             
-        st.subheader("2. 氣象特徵與 PM2.5 關係")
+        with col_eda2:
+            fig_humid = px.scatter(
+                sample_df, x='LASS_Humid', y='LASS_PM25', 
+                color='MonitorName', # 以測站名稱著色
+                opacity=0.6,
+                title="PM2.5 與濕度散布關係圖",
+                labels={'LASS_Humid': '濕度 (%)', 'LASS_PM25': 'PM2.5 (μg/m³)'},
+                trendline="ols",
+                color_continuous_scale=px.colors.sequential.Teal,
+                template="plotly_white"
+            )
+            fig_humid.update_traces(marker=dict(size=5))
+            st.plotly_chart(fig_humid, use_container_width=True)
+
+
+        # 3. 相關係數熱圖 (參考圖三)
+        st.subheader("3. 主要環境特徵相關係數熱圖")
         
-        if 'LASS_PM25' in df_hist.columns and 'LASS_Temp' in df_hist.columns and 'LASS_Humid' in df_hist.columns:
-            
-            sample_df = df_hist.sample(n=min(10000, len(df_hist)), random_state=42)
-            
-            col_eda1, col_eda2 = st.columns(2)
-            
-            with col_eda1:
-                fig_temp = px.scatter(
-                    sample_df, x='LASS_Temp', y='LASS_PM25', 
-                    title="溫度 vs PM2.5 關聯", trendline="ols",
-                    labels={'LASS_Temp': '溫度 (°C)', 'LASS_PM25': 'PM2.5'},
-                    color_discrete_sequence=['#FF6B6B']
-                )
-                st.plotly_chart(fig_temp, use_container_width=True)
-                
-            with col_eda2:
-                fig_humid = px.scatter(
-                    sample_df, x='LASS_Humid', y='LASS_PM25', 
-                    title="濕度 vs PM2.5 關聯", trendline="ols",
-                    labels={'LASS_Humid': '濕度 (%)', 'LASS_PM25': 'PM2.5'},
-                    color_discrete_sequence=['#4ECDC4']
-                )
-                st.plotly_chart(fig_humid, use_container_width=True)
-        else:
-            st.warning("歷史資料缺少關鍵欄位，無法繪製關聯圖。")
+        numeric_cols = ['LASS_PM25', 'LASS_Temp', 'LASS_Humid', 'EPA_PM25', 'AQI', 'Wind_Speed']
+        existing_numeric_cols = [col for col in numeric_cols if col in df_hist.columns]
+        df_corr = df_hist[existing_numeric_cols].copy()
+        
+        # 重新命名欄位以便圖表顯示
+        chinese_names = {
+            'LASS_PM25': 'LASS PM2.5', 'LASS_Temp': 'LASS 溫度', 'LASS_Humid': 'LASS 濕度', 
+            'EPA_PM25': 'EPA PM2.5', 'AQI': 'AQI 指數', 'Wind_Speed': '風速'
+        }
+        df_corr = df_corr.rename(columns=chinese_names)
+        
+        corr_matrix = df_corr.corr()
+        
+        fig_heatmap = px.imshow(
+            corr_matrix,
+            text_auto=True, 
+            aspect="auto",
+            color_continuous_scale=px.colors.diverging.RdBu, # 使用冷暖色調
+            title="主要環境特徵相關係數矩陣"
+        )
+        
+        # 調整熱圖排版
+        fig_heatmap.update_layout(
+            xaxis=dict(tickangle=-45),
+            yaxis=dict(tickangle=0),
+            height=600
+        )
+
+        st.plotly_chart(fig_heatmap, use_container_width=True)
 
 
-# --- 頁面 3: 模型預測展示 (核心修正) ---
+# --- 頁面 3: 模型預測展示 (無變動) ---
 elif page == "模型預測展示":
     st.title("🤖 AI 模型預測與績效")
     
@@ -386,7 +462,7 @@ elif page == "模型預測展示":
                     
                     fig_trend.update_layout(
                         xaxis_title="時間點",
-                        yaxis_title="PM2.5 濃度 (µg/m³)",
+                        yaxis_title="PM2.5 濃度 (μg/m³)",
                         hovermode="x unified"
                     )
                     
